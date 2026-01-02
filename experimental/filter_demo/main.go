@@ -161,35 +161,69 @@ func demo3TrainGateSpecialization() {
 	// -----------------------------------------------------------
 	fmt.Printf("   🎓 Pre-training Expert 1 (responds to HIGH first element)...\n")
 	expert1 := nn.InitDenseLayer(inputSize, expertSize, nn.ActivationSigmoid)
-	// Train expert1: high first element -> high output
-	for i := 0; i < 1000; i++ {
-		input := make([]float32, inputSize)
-		for j := range input {
-			input[j] = rand.Float32()
-		}
-		input[0] = 0.7 + rand.Float32()*0.3 // First element always high
+	
+	// Create temp net for training Expert 1
+	e1Net := nn.NewNetwork(inputSize, 1, 1, 1)
+	e1Net.SetLayer(0, 0, 0, expert1)
 
-		// Simple weight adjustment toward high output
-		for k := range expert1.Kernel {
-			expert1.Kernel[k] += 0.001 * input[k%inputSize]
+	// Train Expert 1: High Input -> High Output (1.0), Low Input -> Low Output (0.0)
+	trainData1 := make([]nn.TrainingBatch, 2000)
+	for i := range trainData1 {
+		input := make([]float32, inputSize)
+		for j := range input { input[j] = rand.Float32() }
+		
+		target := float32(0.0)
+		if rand.Float32() > 0.5 {
+			input[0] = 0.7 + rand.Float32()*0.3 // High
+			target = 1.0
+		} else {
+			input[0] = rand.Float32()*0.3 // Low
+			target = 0.0
 		}
+		trainData1[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
+	
+	config1 := &nn.TrainingConfig{
+		Epochs: 10,
+		LearningRate: 0.1,
+		Verbose: false,
+		LossType: "mse",
+	}
+	e1Net.Train(trainData1, config1)
+	expert1 = *e1Net.GetLayer(0, 0, 0) // Update config
 
 	fmt.Printf("   🎓 Pre-training Expert 2 (responds to LOW first element)...\n")
 	expert2 := nn.InitDenseLayer(inputSize, expertSize, nn.ActivationSigmoid)
-	// Train expert2: low first element -> high output
-	for i := 0; i < 1000; i++ {
-		input := make([]float32, inputSize)
-		for j := range input {
-			input[j] = rand.Float32()
-		}
-		input[0] = rand.Float32() * 0.3 // First element always low
+	
+	// Create temp net for training Expert 2
+	e2Net := nn.NewNetwork(inputSize, 1, 1, 1)
+	e2Net.SetLayer(0, 0, 0, expert2)
 
-		// Simple weight adjustment toward high output
-		for k := range expert2.Kernel {
-			expert2.Kernel[k] += 0.001 * input[k%inputSize]
+	// Train Expert 2: Low Input -> High Output (1.0), High Input -> Low Output (0.0)
+	trainData2 := make([]nn.TrainingBatch, 2000)
+	for i := range trainData2 {
+		input := make([]float32, inputSize)
+		for j := range input { input[j] = rand.Float32() }
+		
+		target := float32(0.0)
+		if rand.Float32() > 0.5 {
+			input[0] = rand.Float32()*0.3 // Low
+			target = 1.0
+		} else {
+			input[0] = 0.7 + rand.Float32()*0.3 // High
+			target = 0.0
 		}
+		trainData2[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
+	
+	config2 := &nn.TrainingConfig{
+		Epochs: 10,
+		LearningRate: 0.1,
+		Verbose: false,
+		LossType: "mse",
+	}
+	e2Net.Train(trainData2, config2)
+	expert2 = *e2Net.GetLayer(0, 0, 0) // Update config
 
 	// -----------------------------------------------------------
 	// STEP 2: Create filter layer combining both experts

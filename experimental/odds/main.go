@@ -126,6 +126,7 @@ func demo3TrainGateSpecializationStitched() {
 	commonOutputSize := 4
 	
 	// -----------------------------------------------------------
+	// -----------------------------------------------------------
 	// STEP 1: Create two odd-sized networks and pre-train them
 	// Expert 1 (Size 3): Detects High input[0]
 	// Expert 2 (Size 5): Detects Low input[0]
@@ -136,45 +137,36 @@ func demo3TrainGateSpecializationStitched() {
 	expert1Core := nn.InitDenseLayer(inputSize, 3, nn.ActivationSigmoid)
 	stitch1 := nn.InitStitchLayer(3, commonOutputSize)
 	
-	// We wrap them in a small network to train
 	net1 := nn.NewNetwork(inputSize, 1, 1, 2)
 	net1.SetLayer(0, 0, 0, expert1Core)
 	net1.SetLayer(0, 0, 1, stitch1)
 	
-	ts1 := nn.NewTweenState(net1, nil)
-	ts1.Config.UseChainRule = true
-	
-	for i := 0; i < 500; i++ { // Fast pre-training
+	// Generate training data for Expert 1
+	// Task: if input[0] is high, output high
+	trainData1 := make([]nn.TrainingBatch, 2000)
+	for i := range trainData1 {
 		input := make([]float32, inputSize)
 		for j := range input { input[j] = rand.Float32() }
 		
-		// Task: if input[0] is high, output high
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
-			input[0] = 0.8 + rand.Float32()*0.2
+			input[0] = 0.8 + rand.Float32()*0.2 // High input
 			target = 1.0
 		} else {
-			input[0] = rand.Float32()*0.2
+			input[0] = rand.Float32()*0.2 // Low input
 			target = 0.0
 		}
-		
-		// Train to match target (using simple gradient descent via TweenStep)
-		// We use a simple reinforcement signal:
-		// Just pull weights in direction of input if target is high.
-		// Manual weight update for reliable demo speed:
-		
-		if target > 0.5 {
-			// Encourage high output for this input
-			for k := range expert1Core.Kernel {
-				expert1Core.Kernel[k] += 0.01 * input[k%inputSize]
-			}
-			// Stitch layer is linear, also needs to pass signal
-			for k := range stitch1.Kernel {
-				stitch1.Kernel[k] += 0.01 // positive bias
-			}
-		}
+		trainData1[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
-	// GetLayer returns pointer. InitSequentialLayer takes values.
+
+	config1 := &nn.TrainingConfig{
+		Epochs: 10,
+		LearningRate: 0.1,
+		Verbose: false,
+		LossType: "mse",
+	}
+	net1.Train(trainData1, config1)
+
 	branch1 := nn.InitSequentialLayer(*net1.GetLayer(0, 0, 0), *net1.GetLayer(0, 0, 1))
 
 	// Training Expert 2 (Size 5) + Stitch (Size 4)
@@ -186,35 +178,32 @@ func demo3TrainGateSpecializationStitched() {
 	net2.SetLayer(0, 0, 0, expert2Core)
 	net2.SetLayer(0, 0, 1, stitch2)
 	
-	for i := 0; i < 500; i++ {
+	// Generate training data for Expert 2
+	// Logic: Low input -> High Output
+	trainData2 := make([]nn.TrainingBatch, 2000)
+	for i := range trainData2 {
 		input := make([]float32, inputSize)
 		for j := range input { input[j] = rand.Float32() }
 		
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
-			input[0] = rand.Float32()*0.2 // LOW input
+			input[0] = rand.Float32()*0.2 // Low input
 			target = 1.0 // High Output
 		} else {
-			input[0] = 0.8 + rand.Float32()*0.2 // HIGH input
+			input[0] = 0.8 + rand.Float32()*0.2 // High input
 			target = 0.0 // Low Output
 		}
-		
-		if target > 0.5 {
-			// Manual update to inverted logic
-			// Negative weights for input[0]
-			for k := 0; k < len(expert2Core.Kernel); k++ {
-				inIdx := k % inputSize
-				if inIdx == 0 {
-					expert2Core.Kernel[k] -= 0.01 // Negative weight for input 0
-				} else {
-					expert2Core.Kernel[k] += 0.01 * input[inIdx]
-				}
-			}
-			for k := range stitch2.Kernel {
-				stitch2.Kernel[k] += 0.01
-			}
-		}
+		trainData2[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
+
+	config2 := &nn.TrainingConfig{
+		Epochs: 10,
+		LearningRate: 0.1,
+		Verbose: false,
+		LossType: "mse",
+	}
+	net2.Train(trainData2, config2)
+
 	branch2 := nn.InitSequentialLayer(*net2.GetLayer(0, 0, 0), *net2.GetLayer(0, 0, 1))
 
 	// -----------------------------------------------------------
