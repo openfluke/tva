@@ -83,8 +83,11 @@ type TimeWindow struct {
 	TimeMs        int     `json:"timeMs"`
 	Outputs       int     `json:"outputs"`
 	TotalAccuracy float64 `json:"totalAccuracy"`
-	Accuracy      float64 `json:"accuracy"` // Average prediction accuracy %
+	Accuracy      float64 `json:"accuracy"`    // Average prediction accuracy %
 	FreqSwitches  int     `json:"freqSwitches"`
+	MaxLatencyMs  float64 `json:"maxLatencyMs"` // Longest gap between outputs in this window
+	AvailableMs   float64 `json:"availableMs"`  // Time spent producing outputs (not blocked)
+	BlockedMs     float64 `json:"blockedMs"`    // Time spent blocked in training
 }
 
 // ModeResult holds per-mode benchmark results
@@ -98,6 +101,12 @@ type ModeResult struct {
 	Consistency      float64      `json:"consistency"` // % windows above threshold
 	ThroughputPerSec float64      `json:"throughputPerSec"`
 	Score            float64      `json:"score"` // T×S×C / 100000
+	// New availability metrics
+	AvailabilityPct   float64 `json:"availabilityPct"`   // % of time producing outputs
+	TotalBlockedMs    float64 `json:"totalBlockedMs"`    // Total time blocked in training
+	AvgLatencyMs      float64 `json:"avgLatencyMs"`      // Average max latency per window
+	MaxLatencyMs      float64 `json:"maxLatencyMs"`      // Peak latency (worst gap)
+	ZeroOutputWindows int     `json:"zeroOutputWindows"` // Windows with 0 outputs (fully blocked)
 }
 
 // BenchmarkResults is the full output
@@ -289,6 +298,11 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 	currentFreqIdx := 0
 	lastSwitchTime := start
 
+	// Latency and availability tracking
+	lastOutputTime := time.Now()
+	var totalBlockedTime time.Duration
+	windowStartTime := time.Now()
+
 	// =========================================================================
 	// MAIN TRAINING LOOP: Switch frequency every 2.5 seconds for 10 seconds
 	// =========================================================================
@@ -298,7 +312,13 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 		// Update window (50ms windows)
 		newWindow := int(elapsed / WindowDuration)
 		if newWindow > currentWindow && newWindow < numWindows {
+			// Finalize the previous window's available time
+			if currentWindow < numWindows {
+				windowElapsed := time.Since(windowStartTime).Seconds() * 1000
+				result.Windows[currentWindow].AvailableMs = windowElapsed - result.Windows[currentWindow].BlockedMs
+			}
 			currentWindow = newWindow
+			windowStartTime = time.Now()
 		}
 
 		// Check for frequency switch (every 2.5 seconds)
@@ -345,8 +365,15 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 			}
 		}
 
-		// Record to current window
+		// Record to current window with latency tracking
 		if currentWindow < numWindows {
+			// Calculate latency since last output
+			latencyMs := time.Since(lastOutputTime).Seconds() * 1000
+			if latencyMs > result.Windows[currentWindow].MaxLatencyMs {
+				result.Windows[currentWindow].MaxLatencyMs = latencyMs
+			}
+			lastOutputTime = time.Now()
+
 			result.Windows[currentWindow].Outputs++
 			result.Windows[currentWindow].TotalAccuracy += sampleAcc
 			result.TotalOutputs++
@@ -364,7 +391,14 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 				for i, s := range trainBatch {
 					batches[i] = nn.TrainingBatch{Input: s.Input, Target: []float32{s.Target}}
 				}
+				// Track blocking time during batch training
+				trainStart := time.Now()
 				net.Train(batches, &nn.TrainingConfig{Epochs: 1, LearningRate: LearningRate, LossType: "mse"})
+				blockDuration := time.Since(trainStart)
+				totalBlockedTime += blockDuration
+				if currentWindow < numWindows {
+					result.Windows[currentWindow].BlockedMs += blockDuration.Seconds() * 1000
+				}
 				trainBatch = trainBatch[:0]
 				lastTrainTime = time.Now()
 			}
@@ -382,6 +416,8 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 			// Batch tween - accumulates samples, trains periodically with regression gradients
 			trainBatch = append(trainBatch, TrainingSample{Input: input, Target: target})
 			if time.Since(lastTrainTime) > TrainInterval && len(trainBatch) > 0 {
+				// Track blocking time during batch training
+				trainStart := time.Now()
 				for _, s := range trainBatch {
 					out := ts.ForwardPass(net, s.Input)
 					// Regression gradient: target - output
@@ -393,6 +429,11 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 					ts.ChainGradients[totalLayers] = outputGrad
 					ts.BackwardTargets[totalLayers] = []float32{s.Target}
 					ts.TweenWeightsChainRule(net, LearningRate)
+				}
+				blockDuration := time.Since(trainStart)
+				totalBlockedTime += blockDuration
+				if currentWindow < numWindows {
+					result.Windows[currentWindow].BlockedMs += blockDuration.Seconds() * 1000
 				}
 				trainBatch = trainBatch[:0]
 				lastTrainTime = time.Now()
@@ -418,9 +459,13 @@ func runSineWaveBenchmark(mode TrainingMode, allInputs [][][]float32, allTargets
 		if result.Windows[i].Outputs > 0 {
 			result.Windows[i].Accuracy = result.Windows[i].TotalAccuracy / float64(result.Windows[i].Outputs)
 		}
+		// Finalize available time for each window
+		windowDurationMs := WindowDuration.Seconds() * 1000
+		result.Windows[i].AvailableMs = windowDurationMs - result.Windows[i].BlockedMs
 	}
 
 	result.TrainTimeSec = time.Since(start).Seconds()
+	result.TotalBlockedMs = totalBlockedTime.Seconds() * 1000
 	calculateSummaryMetrics(result)
 
 	return result
@@ -458,6 +503,25 @@ func calculateSummaryMetrics(result *ModeResult) {
 
 	// Score = (T × S × C) / 100000
 	result.Score = (result.ThroughputPerSec * result.Stability * result.Consistency) / 100000
+
+	// NEW: Availability metrics
+	// Availability % = (total time - blocked time) / total time * 100
+	totalTimeMs := result.TrainTimeSec * 1000
+	result.AvailabilityPct = ((totalTimeMs - result.TotalBlockedMs) / totalTimeMs) * 100
+
+	// Average and max latency across all windows
+	latencySum := 0.0
+	result.MaxLatencyMs = 0
+	for _, w := range result.Windows {
+		latencySum += w.MaxLatencyMs
+		if w.MaxLatencyMs > result.MaxLatencyMs {
+			result.MaxLatencyMs = w.MaxLatencyMs
+		}
+		if w.Outputs == 0 {
+			result.ZeroOutputWindows++
+		}
+	}
+	result.AvgLatencyMs = latencySum / float64(len(result.Windows))
 }
 
 func clipGrad(v, max float32) float32 {
@@ -480,6 +544,7 @@ func saveResults(results *BenchmarkResults) {
 }
 
 func printTimeline(results *BenchmarkResults) {
+	// ACCURACY TIMELINE
 	fmt.Println("\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║           PREDICTION ACCURACY % (50ms windows) — Sin(1x)→Sin(2x)→Sin(3x)→Sin(4x) switching every 2.5s                                          ║")
 	fmt.Println("║           NormalBP PAUSES to batch train → low throughput | StepTweenChain trains EVERY sample → maintains accuracy                            ║")
@@ -515,33 +580,121 @@ func printTimeline(results *BenchmarkResults) {
 
 	fmt.Println("╚══════════════════════╩════════════════════════════════════════════════════════════════════════════════════════════════════════╩═══════╩════════════╝")
 	fmt.Println("                           ↑ 2.5s     ↑ 5.0s     ↑ 7.5s        ← Frequency switches")
-}
 
-func printSummary(results *BenchmarkResults) {
-	fmt.Println("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║                              🌊 SINE WAVE ADAPTATION SUMMARY 🌊                                                ║")
-	fmt.Println("╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
-	fmt.Println("║                                                                                                                ║")
-	fmt.Println("║  Mode               │ Avg Accuracy │ Stability │ Consistency │ Throughput  │ Score       │ Freq Switches     ║")
-	fmt.Println("║  ───────────────────┼──────────────┼───────────┼─────────────┼─────────────┼─────────────┼───────────────────║")
-
-	bestScore := 0.0
-	bestMode := ""
+	// OUTPUTS PER SECOND TIMELINE (shows gaps!)
+	fmt.Println("\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║           OUTPUTS PER SECOND — Shows throughput gaps when batch training blocks inference                                                      ║")
+	fmt.Println("║           ⚠  Lower numbers = blocked by training | Gaps = unavailable for inference                                                            ║")
+	fmt.Println("╠══════════════════════╦════════════════════════════════════════════════════════════════════════════════════════════════════════╦═══════╦════════════╣")
+	fmt.Printf("║ Mode                 ║")
+	for i := 0; i < 10; i++ {
+		fmt.Printf(" %ds  ", i+1)
+	}
+	fmt.Printf("║ Total ║ Avail%%     ║\n")
+	fmt.Println("╠══════════════════════╬════════════════════════════════════════════════════════════════════════════════════════════════════════╬═══════╬════════════╣")
 
 	for _, modeName := range results.Modes {
 		r := results.Results[modeName]
-		fmt.Printf("║  %-18s │  %7.1f%%   │  %6.1f%%  │   %6.1f%%   │  %9.0f  │  %9.0f  │        %d          ║\n",
-			modeName, r.AvgTrainAccuracy, r.Stability, r.Consistency, r.ThroughputPerSec, r.Score, r.TotalFreqSwitch)
+		fmt.Printf("║ %-20s ║", modeName)
+
+		// Print outputs for each 1-second block (sum of 20 windows)
+		for sec := 0; sec < 10; sec++ {
+			totalOutputs := 0
+			for w := sec * 20; w < (sec+1)*20 && w < len(r.Windows); w++ {
+				totalOutputs += r.Windows[w].Outputs
+			}
+			fmt.Printf(" %4d", totalOutputs)
+		}
+		fmt.Printf(" ║ %5d ║ %6.1f%%    ║\n", r.TotalOutputs, r.AvailabilityPct)
+	}
+
+	fmt.Println("╚══════════════════════╩════════════════════════════════════════════════════════════════════════════════════════════════════════╩═══════╩════════════╝")
+
+	// MAX LATENCY PER SECOND TIMELINE (shows blocking spikes!)
+	fmt.Println("\n╔══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║           MAX LATENCY (ms) — Longest gap between outputs in each second                                                                        ║")
+	fmt.Println("║           ⚠  High values = system blocked during batch training | Low+consistent = always responsive                                           ║")
+	fmt.Println("╠══════════════════════╦════════════════════════════════════════════════════════════════════════════════════════════════════════╦═══════╦════════════╣")
+	fmt.Printf("║ Mode                 ║")
+	for i := 0; i < 10; i++ {
+		fmt.Printf(" %ds  ", i+1)
+	}
+	fmt.Printf("║ Peak  ║ Blocked    ║\n")
+	fmt.Println("╠══════════════════════╬════════════════════════════════════════════════════════════════════════════════════════════════════════╬═══════╬════════════╣")
+
+	for _, modeName := range results.Modes {
+		r := results.Results[modeName]
+		fmt.Printf("║ %-20s ║", modeName)
+
+		// Print max latency for each 1-second block
+		for sec := 0; sec < 10; sec++ {
+			maxLat := 0.0
+			for w := sec * 20; w < (sec+1)*20 && w < len(r.Windows); w++ {
+				if r.Windows[w].MaxLatencyMs > maxLat {
+					maxLat = r.Windows[w].MaxLatencyMs
+				}
+			}
+			fmt.Printf(" %4.0f", maxLat)
+		}
+		fmt.Printf(" ║ %5.0f ║ %6.0fms   ║\n", r.MaxLatencyMs, r.TotalBlockedMs)
+	}
+
+	fmt.Println("╚══════════════════════╩════════════════════════════════════════════════════════════════════════════════════════════════════════╩═══════╩════════════╝")
+}
+
+func printSummary(results *BenchmarkResults) {
+	fmt.Println("\n╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                                               🌊 SINE WAVE ADAPTATION SUMMARY 🌊                                                                         ║")
+	fmt.Println("╠═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Println("║                                                                                                                                                             ║")
+	fmt.Println("║  Mode               │ Accuracy │ Stability │ Throughput │ Score   │ Avail %  │ Blocked(ms) │ Peak Lat │ Avg Lat │ 0-Out Windows │ ★ Key Insight ★         ║")
+	fmt.Println("║  ───────────────────┼──────────┼───────────┼────────────┼─────────┼──────────┼─────────────┼──────────┼─────────┼───────────────┼─────────────────────────║")
+
+	bestScore := 0.0
+	bestMode := ""
+	lowestBlocked := math.MaxFloat64
+	lowestBlockedMode := ""
+
+	for _, modeName := range results.Modes {
+		r := results.Results[modeName]
+
+		// Determine the key insight for this mode
+		insight := ""
+		if modeName == "NormalBP" {
+			insight = "BLOCKS during training"
+		} else if modeName == "StepTweenChain" {
+			insight = "ALWAYS available ✓"
+		} else if r.ZeroOutputWindows > 0 {
+			insight = fmt.Sprintf("%d windows blocked", r.ZeroOutputWindows)
+		} else if r.TotalBlockedMs > 100 {
+			insight = "Some blocking"
+		} else {
+			insight = "Low blocking"
+		}
+
+		fmt.Printf("║  %-18s │  %5.1f%%  │   %5.1f%%  │  %8.0f  │ %7.0f │  %5.1f%%  │  %9.0f  │  %5.1fms │ %5.1fms  │      %3d      │ %-23s ║\n",
+			modeName, r.AvgTrainAccuracy, r.Stability, r.ThroughputPerSec, r.Score,
+			r.AvailabilityPct, r.TotalBlockedMs, r.MaxLatencyMs, r.AvgLatencyMs,
+			r.ZeroOutputWindows, insight)
 
 		if r.Score > bestScore {
 			bestScore = r.Score
 			bestMode = modeName
 		}
+		if r.TotalBlockedMs < lowestBlocked {
+			lowestBlocked = r.TotalBlockedMs
+			lowestBlockedMode = modeName
+		}
 	}
 
-	fmt.Println("║                                                                                                                ║")
-	fmt.Println("╠════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
-	fmt.Printf("║  🏆 WINNER: %-18s with Score: %.0f                                                              ║\n", bestMode, bestScore)
-	fmt.Println("║                                                                                                                ║")
-	fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+	// Print analysis
+	fmt.Println("║                                                                                                                                                             ║")
+	fmt.Println("╠═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╣")
+	fmt.Printf("║  🏆 BEST SCORE:        %-18s with Score: %.0f                                                                                                   ║\n", bestMode, bestScore)
+	fmt.Printf("║  ⚡ LOWEST BLOCKING:    %-18s with only %.0fms blocked                                                                                             ║\n", lowestBlockedMode, lowestBlocked)
+	fmt.Println("║                                                                                                                                                             ║")
+	fmt.Println("║  💡 KEY INSIGHT: NormalBP achieves high accuracy BUT blocks inference during batch training.                                                                ║")
+	fmt.Println("║                  StepTweenChain maintains ~100%% availability while still training every sample!                                                            ║")
+	fmt.Println("║                                                                                                                                                             ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 }

@@ -12,7 +12,7 @@ import (
 )
 
 // Test 17: Real-Time Adaptation Benchmark
-//
+//dr221 phd
 // Shows how each training method handles a MID-STREAM TASK CHANGE.
 // The key question: How quickly can each method ADAPT?
 //
