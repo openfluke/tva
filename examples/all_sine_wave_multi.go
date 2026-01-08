@@ -86,6 +86,10 @@ const (
 	TestLayerRNN
 	TestLayerLSTM
 	TestLayerAttention
+	TestLayerSwiGLU
+	TestLayerNormDense
+	TestLayerConv1D
+	TestLayerResidual
 )
 
 var layerNames = map[LayerTestType]string{
@@ -94,6 +98,10 @@ var layerNames = map[LayerTestType]string{
 	TestLayerRNN:       "RNN",
 	TestLayerLSTM:      "LSTM",
 	TestLayerAttention: "Attention",
+	TestLayerSwiGLU:    "SwiGLU",
+	TestLayerNormDense: "NormDense",
+	TestLayerConv1D:    "Conv1D",
+	TestLayerResidual:  "Residual",
 }
 
 // NumericType enum
@@ -200,11 +208,21 @@ func main() {
 		allInputs[i], allTargets[i] = createSamples(sineData)
 	}
 
-	layers := []LayerTestType{TestLayerDense, TestLayerConv2D, TestLayerRNN, TestLayerLSTM, TestLayerAttention}
+	allLayers := []LayerTestType{
+		TestLayerDense,
+		TestLayerConv2D,
+		TestLayerRNN,
+		TestLayerLSTM,
+		TestLayerSwiGLU,
+		TestLayerNormDense,
+		TestLayerAttention,
+		TestLayerConv1D,
+		TestLayerResidual,
+	}
 	modes := []TrainingMode{ModeNormalBP, ModeStepBP, ModeTween, ModeTweenChain, ModeStepTween, ModeStepTweenChain}
 	types := []NumericType{TypeInt8, TypeInt16, TypeInt32, TypeInt64, TypeUint8, TypeUint16, TypeUint32, TypeUint64, TypeFloat32, TypeFloat64}
 
-	totalTests := len(layers) * len(modes) * len(types)
+	totalTests := len(allLayers) * len(modes) * len(types)
 	numWindows := int(TestDuration / WindowDuration)
 	fmt.Printf("\n📊 Running %d tests | %d windows at %dms each | %s per test\n\n", totalTests, numWindows, WindowDuration.Milliseconds(), TestDuration)
 
@@ -221,7 +239,13 @@ func main() {
 	sem := make(chan struct{}, MaxConcurrent)
 	testNum := 0
 
-	for _, layer := range layers {
+	// Create results directory
+	resultsDir := "results"
+	if err := os.MkdirAll(resultsDir, 0755); err != nil {
+		fmt.Printf("Error creating results directory: %v\n", err)
+	}
+
+	for _, layer := range allLayers {
 		for _, mode := range modes {
 			for _, numType := range types {
 				wg.Add(1)
@@ -235,6 +259,30 @@ func main() {
 					layerName := layerNames[l]
 					modeName := modeNames[m]
 					typeName := typeNames[t]
+
+					// Check if result already exists
+					filename := fmt.Sprintf("%s/result_%s_%s_%s.json", resultsDir, layerName, modeName, typeName)
+					if _, err := os.Stat(filename); err == nil {
+						// Load existing result
+						data, err := os.ReadFile(filename)
+						if err == nil {
+							var existingResult TestResult
+							if err := json.Unmarshal(data, &existingResult); err == nil {
+								mu.Lock()
+								results.Results = append(results.Results, existingResult)
+								if existingResult.Passed {
+									results.Passed++
+								} else {
+									results.Failed++
+								}
+								mu.Unlock()
+								fmt.Printf("Skipping %s %s %s (already exists)\n", layerName, modeName, typeName)
+								return
+							}
+						}
+					}
+
+					fmt.Printf("Running Test %d/%d: %s | %s | %s\n", num, totalTests, layerName, modeName, typeName)
 
 					result := runCombinationTest(l, m, t, allInputs, allTargets, frequencies)
 					result.LayerType = layerName
@@ -256,6 +304,13 @@ func main() {
 					}
 					fmt.Printf("%s [%3d/%d] %-10s %-15s %-8s | Acc: %5.1f%% | Score: %.0f\n",
 						status, num, totalTests, layerName, modeName, typeName, result.AvgAccuracy, result.Score)
+
+					// Save individual result
+					if data, err := json.MarshalIndent(result, "", "  "); err == nil {
+						if err := os.WriteFile(filename, data, 0644); err != nil {
+							fmt.Printf("Error saving result to %s: %v\n", filename, err)
+						}
+					}
 				}(layer, mode, numType, testNum)
 			}
 		}
@@ -332,132 +387,77 @@ func createSamples(data []float64) (inputs [][]float32, targets []float32) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// NETWORK CREATION FOR EACH LAYER TYPE
+// NETWORK CREATION FOR EACH LAYER TYPE (using nn.BuildSimpleNetwork API)
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// createNetworkForLayerType creates a network for the given layer type with default float32 dtype
 func createNetworkForLayerType(layerType LayerTestType) *nn.Network {
+	return createNetworkForLayerTypeWithDType(layerType, nn.DTypeFloat32)
+}
+
+// createNetworkForLayerTypeWithDType creates a network for the given layer type and dtype
+func createNetworkForLayerTypeWithDType(layerType LayerTestType, dtype nn.DType) *nn.Network {
+	config := nn.SimpleNetworkConfig{
+		InputSize:  InputSize,
+		HiddenSize: HiddenSize,
+		OutputSize: OutputSize,
+		Activation: nn.ActivationLeakyReLU,
+		InitScale:  InitScale,
+		NumLayers:  2,
+		DType:      dtype,
+	}
+
 	switch layerType {
 	case TestLayerDense:
-		return createDenseNetwork()
+		config.LayerType = nn.BrainDense
 	case TestLayerConv2D:
-		return createConv2DNetwork()
+		config.LayerType = nn.BrainConv2D
 	case TestLayerRNN:
-		return createRNNNetwork()
+		config.LayerType = nn.BrainRNN
 	case TestLayerLSTM:
-		return createLSTMNetwork()
+		config.LayerType = nn.BrainLSTM
 	case TestLayerAttention:
-		return createAttentionNetwork()
+		config.LayerType = nn.BrainMHA
+	case TestLayerSwiGLU:
+		config.LayerType = nn.BrainSwiGLU
+	case TestLayerNormDense:
+		config.LayerType = nn.BrainNormDense
+	case TestLayerConv1D:
+		config.LayerType = nn.BrainConv1D
+	case TestLayerResidual:
+		config.LayerType = nn.BrainResidual
 	default:
-		return createDenseNetwork()
+		config.LayerType = nn.BrainDense
 	}
+
+	return nn.BuildSimpleNetwork(config)
 }
 
-func createDenseNetwork() *nn.Network {
-	net := nn.NewNetwork(InputSize, 1, 1, 3)
-	net.BatchSize = 1
-
-	layer0 := nn.InitDenseLayer(InputSize, HiddenSize, nn.ActivationLeakyReLU)
-	scaleWeights(layer0.Kernel, InitScale)
-	net.SetLayer(0, 0, 0, layer0)
-
-	layer1 := nn.InitDenseLayer(HiddenSize, HiddenSize, nn.ActivationLeakyReLU)
-	scaleWeights(layer1.Kernel, InitScale)
-	net.SetLayer(0, 0, 1, layer1)
-
-	layer2 := nn.InitDenseLayer(HiddenSize, OutputSize, nn.ActivationSigmoid)
-	scaleWeights(layer2.Kernel, InitScale)
-	net.SetLayer(0, 0, 2, layer2)
-
-	return net
-}
-
-func createConv2DNetwork() *nn.Network {
-	// Use 4x4=16 input reshaped as 4x4x1 (height=4, width=4, channels=1)
-	// Matches reference pattern from all_layers_all_modes_all_numerical.go
-	net := nn.NewNetwork(InputSize, 1, 1, 2)
-	net.BatchSize = 1
-
-	// Conv2D: 4x4x1 with 2 filters, kernel 2x2, stride 1, padding 2
-	// Output: (4+2*2-2)/1 + 1 = 7 x 7 x 2filters = 98 outputs? No, use same as reference
-	// Reference: InitConv2DLayer(4, 4, 1, 2, 2, 1, 2, nn.ActivationLeakyReLU) -> output 18
-	conv := nn.InitConv2DLayer(4, 4, 1, 2, 2, 1, 2, nn.ActivationLeakyReLU)
-	net.SetLayer(0, 0, 0, conv)
-
-	// Dense: 18 -> 1 (reference outputs 18 elements)
-	dense := nn.InitDenseLayer(18, OutputSize, nn.ActivationSigmoid)
-	scaleWeights(dense.Kernel, InitScale)
-	net.SetLayer(0, 0, 1, dense)
-
-	return net
-}
-
-func createRNNNetwork() *nn.Network {
-	net := nn.NewNetwork(InputSize, 1, 1, 3)
-	net.BatchSize = 1
-
-	// RNN layer: input 10 -> hidden 16
-	rnn := nn.InitRNNLayer(InputSize, HiddenSize, 1, 1)
-	net.SetLayer(0, 0, 0, rnn)
-
-	// Dense: 16 -> 16
-	layer1 := nn.InitDenseLayer(HiddenSize, HiddenSize, nn.ActivationLeakyReLU)
-	scaleWeights(layer1.Kernel, InitScale)
-	net.SetLayer(0, 0, 1, layer1)
-
-	// Output: 16 -> 1
-	layer2 := nn.InitDenseLayer(HiddenSize, OutputSize, nn.ActivationSigmoid)
-	scaleWeights(layer2.Kernel, InitScale)
-	net.SetLayer(0, 0, 2, layer2)
-
-	return net
-}
-
-func createLSTMNetwork() *nn.Network {
-	net := nn.NewNetwork(InputSize, 1, 1, 3)
-	net.BatchSize = 1
-
-	// LSTM layer: input 10 -> hidden 16
-	lstm := nn.InitLSTMLayer(InputSize, HiddenSize, 1, 1)
-	net.SetLayer(0, 0, 0, lstm)
-
-	// Dense: 16 -> 16
-	layer1 := nn.InitDenseLayer(HiddenSize, HiddenSize, nn.ActivationLeakyReLU)
-	scaleWeights(layer1.Kernel, InitScale)
-	net.SetLayer(0, 0, 1, layer1)
-
-	// Output: 16 -> 1
-	layer2 := nn.InitDenseLayer(HiddenSize, OutputSize, nn.ActivationSigmoid)
-	scaleWeights(layer2.Kernel, InitScale)
-	net.SetLayer(0, 0, 2, layer2)
-
-	return net
-}
-
-func createAttentionNetwork() *nn.Network {
-	// Use Dense layers as a stand-in for attention mechanics on this 1D regression task
-	// Multi-head attention requires sequence data which doesn't fit well with single-value prediction
-	net := nn.NewNetwork(InputSize, 1, 1, 3)
-	net.BatchSize = 1
-
-	// "Attention-like" processing: Dense with Tanh (like value projection)
-	layer0 := nn.InitDenseLayer(InputSize, HiddenSize, nn.ActivationTanh)
-	scaleWeights(layer0.Kernel, InitScale)
-	net.SetLayer(0, 0, 0, layer0)
-
-	layer1 := nn.InitDenseLayer(HiddenSize, HiddenSize, nn.ActivationTanh)
-	scaleWeights(layer1.Kernel, InitScale)
-	net.SetLayer(0, 0, 1, layer1)
-
-	layer2 := nn.InitDenseLayer(HiddenSize, OutputSize, nn.ActivationSigmoid)
-	scaleWeights(layer2.Kernel, InitScale)
-	net.SetLayer(0, 0, 2, layer2)
-
-	return net
-}
-
-func scaleWeights(weights []float32, scale float32) {
-	for i := range weights {
-		weights[i] *= scale
+// numericTypeToDType converts NumericType to nn.DType
+func numericTypeToDType(nt NumericType) nn.DType {
+	switch nt {
+	case TypeFloat32:
+		return nn.DTypeFloat32
+	case TypeFloat64:
+		return nn.DTypeFloat64
+	case TypeInt8:
+		return nn.DTypeInt8
+	case TypeInt16:
+		return nn.DTypeInt16
+	case TypeInt32:
+		return nn.DTypeInt32
+	case TypeInt64:
+		return nn.DTypeInt64
+	case TypeUint8:
+		return nn.DTypeUint8
+	case TypeUint16:
+		return nn.DTypeUint16
+	case TypeUint32:
+		return nn.DTypeUint32
+	case TypeUint64:
+		return nn.DTypeUint64
+	default:
+		return nn.DTypeFloat32
 	}
 }
 
@@ -1029,7 +1029,7 @@ func printBestConfigPerMode(results *BenchmarkResults) {
 	fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
 	modes := []string{"NormalBP", "StepBP", "Tween", "TweenChain", "StepTween", "StepTweenChain"}
-	layers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention"}
+	allLayers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention", "SwiGLU", "NormDense", "Conv1D", "Residual"}
 	types := []string{"int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64", "float32", "float64"}
 
 	// Build lookup: mode -> layer -> type -> result
@@ -1073,7 +1073,7 @@ func printBestConfigPerMode(results *BenchmarkResults) {
 		fmt.Println("────────────┤")
 
 		// Rows for each layer
-		for _, layer := range layers {
+		for _, layer := range allLayers {
 			fmt.Printf("│ %-10s │", layer)
 			
 			bestTypeScore := 0.0
@@ -1163,7 +1163,7 @@ func printBestTypePerLayerMode(results *BenchmarkResults) {
 	fmt.Println("║                     Which of the 10 numerical types (int8-uint64, float32/64) performs best for each Layer+Mode?                                                        ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
-	layers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention"}
+	allLayers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention", "SwiGLU", "NormDense", "Conv1D", "Residual"}
 	modes := []string{"NormalBP", "StepBP", "Tween", "TweenChain", "StepTween", "StepTweenChain"}
 
 	// Build lookup: layer -> mode -> best result across all numeric types
@@ -1190,7 +1190,7 @@ func printBestTypePerLayerMode(results *BenchmarkResults) {
 	}
 	fmt.Println("")
 
-	for _, layer := range layers {
+	for _, layer := range allLayers {
 		fmt.Printf("│ %-10s │", layer)
 		for _, mode := range modes {
 			if r, ok := bestTypeByLayerMode[layer][mode]; ok {
@@ -1236,7 +1236,7 @@ func printTimelineForFloat32(results *BenchmarkResults) {
 	fmt.Println("║                                    📊 DETAILED TIMELINE (float32 only) 📊                                             ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
-	for _, layerName := range []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention"} {
+	for _, layerName := range []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention", "SwiGLU", "NormDense", "Conv1D", "Residual"} {
 		// Find float32 results for this layer
 		var layerFloat32Results []TestResult
 		for _, r := range results.Results {
@@ -1335,7 +1335,7 @@ func printTimelineForFloat32(results *BenchmarkResults) {
 	fmt.Println("║  Layer/Mode       │ Accuracy │ Stability │ Throughput │ Score   │ Avail %  │ Blocked(ms) │ Peak Lat │ Avg Lat │★ Key Insight ★                ║")
 	fmt.Println("║  ─────────────────┼──────────┼───────────┼────────────┼─────────┼──────────┼─────────────┼──────────┼─────────┼───────────────────────────────║")
 
-	for _, layerName := range []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention"} {
+	for _, layerName := range []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention", "SwiGLU", "NormDense", "Conv1D", "Residual"} {
 		for _, r := range results.Results {
 			if r.LayerType == layerName && r.NumericType == "float32" {
 				insight := ""
@@ -1375,7 +1375,7 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 	fmt.Println("║                                          🏆 CROSS-LAYER COMPARISON (float32) 🏆                                                                          ║")
 	fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
 
-	layers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention"}
+	allLayers := []string{"Dense", "Conv2D", "RNN", "LSTM", "Attention", "SwiGLU", "NormDense", "Conv1D", "Residual"}
 	modes := []string{"NormalBP", "StepBP", "Tween", "TweenChain", "StepTween", "StepTweenChain"}
 
 	// Build lookup map for float32 results
@@ -1392,12 +1392,12 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 	// TABLE 1: Mode × Layer Score Matrix
 	fmt.Println("\n┌─── SCORE MATRIX: Mode × Layer ────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
 	fmt.Print("│ Mode             │")
-	for _, layer := range layers {
+	for _, layer := range allLayers {
 		fmt.Printf(" %-10s │", layer)
 	}
 	fmt.Println(" BEST LAYER                │")
 	fmt.Print("├──────────────────┼")
-	for range layers {
+	for range allLayers {
 		fmt.Print("────────────┼")
 	}
 	fmt.Println("───────────────────────────┤")
@@ -1406,7 +1406,7 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 		fmt.Printf("│ %-16s │", mode)
 		bestScore := 0.0
 		bestLayer := ""
-		for _, layer := range layers {
+		for _, layer := range allLayers {
 			if r, ok := float32Results[layer][mode]; ok {
 				fmt.Printf(" %10.0f │", r.Score)
 				if r.Score > bestScore {
@@ -1420,7 +1420,7 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 		fmt.Printf(" %-25s │\n", fmt.Sprintf("★ %s (%.0f)", bestLayer, bestScore))
 	}
 	fmt.Print("└──────────────────┴")
-	for range layers {
+	for range allLayers {
 		fmt.Print("────────────┴")
 	}
 	fmt.Println("───────────────────────────┘")
@@ -1430,7 +1430,7 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 	fmt.Println("│ Layer      │ Best Mode         │ Score     │ Accuracy  │ Throughput │ Avail %   │ Why This Mode Wins                            │")
 	fmt.Println("├────────────┼───────────────────┼───────────┼───────────┼────────────┼───────────┼───────────────────────────────────────────────┤")
 
-	for _, layer := range layers {
+	for _, layer := range allLayers {
 		bestMode := ""
 		var bestResult TestResult
 		for _, mode := range modes {
@@ -1470,7 +1470,7 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 	fmt.Println("│ Layer      │ NormalBP Score │ StepTweenChain │ Winner           │ Accuracy Δ │ Avail Δ   │ Throughput Δ                        │")
 	fmt.Println("├────────────┼────────────────┼────────────────┼──────────────────┼────────────┼───────────┼─────────────────────────────────────┤")
 
-	for _, layer := range layers {
+	for _, layer := range allLayers {
 		normalBP := float32Results[layer]["NormalBP"]
 		stepTween := float32Results[layer]["StepTweenChain"]
 
