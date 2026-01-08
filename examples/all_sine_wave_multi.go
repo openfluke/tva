@@ -268,16 +268,16 @@ func main() {
 						if err == nil {
 							var existingResult TestResult
 							if err := json.Unmarshal(data, &existingResult); err == nil {
-								mu.Lock()
-								results.Results = append(results.Results, existingResult)
-								if existingResult.Passed {
+								// Only use cached result if it PASSED and has a score > 0
+								if existingResult.Passed && existingResult.Score > 0 {
+									mu.Lock()
+									results.Results = append(results.Results, existingResult)
 									results.Passed++
-								} else {
-									results.Failed++
+									mu.Unlock()
+									fmt.Printf("Skipping %s %s %s (already passed with score %.0f)\n", layerName, modeName, typeName, existingResult.Score)
+									return
 								}
-								mu.Unlock()
-								fmt.Printf("Skipping %s %s %s (already exists)\n", layerName, modeName, typeName)
-								return
+								// Otherwise, fall through to re-run the test
 							}
 						}
 					}
@@ -1080,7 +1080,14 @@ func printBestConfigPerMode(results *BenchmarkResults) {
 			bestTypeName := ""
 			for _, t := range types {
 				if r, ok := resultLookup[modeName][layer][t]; ok {
-					fmt.Printf(" %6.0f │", r.Score)
+					if r.Error != "" {
+						fmt.Print("    ERR │")
+					} else if r.Score == 0 {
+						fmt.Print("      0 │")
+					} else {
+						fmt.Printf(" %6.0f │", r.Score)
+					}
+					
 					if r.Score > bestTypeScore {
 						bestTypeScore = r.Score
 						bestTypeName = t
@@ -1195,7 +1202,13 @@ func printBestTypePerLayerMode(results *BenchmarkResults) {
 		for _, mode := range modes {
 			if r, ok := bestTypeByLayerMode[layer][mode]; ok {
 				// Show type and score
-				fmt.Printf(" %-7s %5.0f │", r.NumericType, r.Score)
+				if r.Score == 0 && r.Error != "" {
+					fmt.Printf(" %-7s %5s │", "ERR", "ERR")
+				} else if r.Score == 0 {
+					fmt.Printf(" %-7s %5d │", r.NumericType, 0)
+				} else {
+					fmt.Printf(" %-7s %5.0f │", r.NumericType, r.Score)
+				}
 			} else {
 				fmt.Print("        N/A    │")
 			}
@@ -1367,6 +1380,9 @@ func printTimelineForFloat32(results *BenchmarkResults) {
 
 	// CROSS-LAYER COMPARISON
 	printCrossLayerComparison(results)
+
+	// FAILURES AND ZERO SCORES
+	printFailuresAndZeroScores(results)
 }
 
 // printCrossLayerComparison shows which modes work best with which layers
@@ -1408,7 +1424,14 @@ func printCrossLayerComparison(results *BenchmarkResults) {
 		bestLayer := ""
 		for _, layer := range allLayers {
 			if r, ok := float32Results[layer][mode]; ok {
-				fmt.Printf(" %10.0f │", r.Score)
+				if r.Error != "" {
+					fmt.Print("    ERR     │")
+				} else if r.Score == 0 {
+					fmt.Print("          0 │")
+				} else {
+					fmt.Printf(" %10.0f │", r.Score)
+				}
+				
 				if r.Score > bestScore {
 					bestScore = r.Score
 					bestLayer = layer
@@ -1524,3 +1547,55 @@ func min(a, b int) int {
 	return b
 }
 
+
+// printFailuresAndZeroScores prints a list of all tests that failed or had a score of 0
+func printFailuresAndZeroScores(results *BenchmarkResults) {
+fmt.Println("\n╔════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+fmt.Println("║                                          ⚠️  FAILURES AND ZERO SCORES REPORT ⚠️                                                                        ║")
+fmt.Println("╚════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+
+count := 0
+fmt.Println("\n┌─── FAILED / ZERO SCORE TESTS ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐")
+fmt.Println("│ Test Details                                    │ Status     │ Reason                                                                                │")
+fmt.Println("├─────────────────────────────────────────────────┼────────────┼───────────────────────────────────────────────────────────────────────────────────────┤")
+
+for _, r := range results.Results {
+isFailure := false
+status := ""
+reason := ""
+
+if !r.Passed {
+isFailure = true
+status = "FAILED ❌"
+if r.Error != "" {
+reason = fmt.Sprintf("Error: %s", r.Error)
+} else {
+reason = "Test reported failure"
+}
+} else if r.Score == 0 {
+isFailure = true
+status = "SCORE 0 ⚠️"
+if r.TotalOutputs == 0 {
+reason = "No outputs produced"
+} else if r.AvgAccuracy == 0 {
+reason = "0% Accuracy"
+} else if r.AvailabilityPct == 0 {
+reason = "0% Availability"
+} else {
+reason = "Low performance metrics resulted in 0 score"
+}
+}
+
+if isFailure {
+count++
+testName := fmt.Sprintf("%s / %s / %s", r.LayerType, r.TrainingMode, r.NumericType)
+fmt.Printf("│ %-47s │ %-10s │ %-85s │\n", testName, status, reason)
+}
+}
+
+if count == 0 {
+fmt.Println("│ No failures or zero scores detected! 🎉         │            │                                                                                       │")
+}
+fmt.Println("└─────────────────────────────────────────────────┴────────────┴───────────────────────────────────────────────────────────────────────────────────────┘")
+fmt.Printf("\nTotal issues found: %d\n", count)
+}
