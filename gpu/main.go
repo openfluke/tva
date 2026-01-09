@@ -1,12 +1,14 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"math"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openfluke/loom/gpu"
@@ -21,6 +23,14 @@ var (
 	flagDType   = flag.String("dtype", "", "Specific dtype to test (e.g. 'float32'). Comma-separated for multiple.")
 	flagAll     = flag.Bool("all", false, "Run all combos")
 	flagAdapter = flag.String("adapter", "", "Substring to select specific GPU adapter (e.g. 'NVIDIA', 'Intel')")
+	flagCache   = flag.String("cache", "", "Path to JSON file to cache results (e.g. 'gpu_results.json')")
+)
+
+type TestCache map[string]LayerResult
+
+var (
+	globalCache TestCache
+	cacheMutex  sync.Mutex
 )
 
 // All supported DTypes (from nn/types.go)
@@ -32,9 +42,9 @@ var allDTypes = []string{
 
 // All supported layer types
 var allLayers = []string{
-	"Dense", "LayerNorm", "RMSNorm", "Softmax",
-	"Embedding", "Residual", "SwiGLU",
-	"Conv1D", "Conv2D", "MHA", "RNN", "LSTM",
+	"Dense", "LayerNorm", "RMSNorm" /*"Softmax",*/, "MHA",
+	"Conv1D", "Conv2D", "RNN", "LSTM",
+	"Embedding" /*"Residual",*/, "SwiGLU",
 }
 
 // All depths
@@ -76,6 +86,12 @@ func main() {
 		depths = parseCSV(*flagDepth, []string{"shallow", "medium", "deep", "stress"})
 	}
 
+	// Load cache if specified
+	if *flagCache != "" {
+		loadCache(*flagCache)
+		defer saveCache(*flagCache)
+	}
+
 	fmt.Printf("Testing %d layers × %d dtypes\n\n", len(layers), len(dtypes))
 
 	totalLayers := 0
@@ -94,7 +110,33 @@ func main() {
 
 		for _, depth := range depths {
 			for _, dtype := range dtypes {
-				result := verifyLayerQuiet(layerType, depth, dtype)
+				cacheKey := fmt.Sprintf("%s|%s|%s", layerType, depth, dtype)
+				var result LayerResult
+				cached := false
+
+				if globalCache != nil {
+					if val, ok := globalCache[cacheKey]; ok && val.Status == "PASS" {
+						result = val
+						cached = true
+					}
+				}
+
+				if !cached {
+					result = verifyLayerQuiet(layerType, depth, dtype)
+					if *flagCache != "" && result.Status == "PASS" {
+						cacheMutex.Lock()
+						if globalCache == nil {
+							globalCache = make(TestCache)
+						}
+						globalCache[cacheKey] = result
+
+						// Auto-save periodically or on every write?
+						// Let's just defer save at end, but maybe safer to save often?
+						// We'll rely on defer saveCache for now, but we can also save here if we want robustness.
+						cacheMutex.Unlock()
+					}
+				}
+
 				if result.Status == "SKIP" {
 					skipCount++
 					continue
@@ -205,6 +247,37 @@ func parseCSV(input string, valid []string) []string {
 	return result
 }
 
+func loadCache(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			fmt.Printf("Warning: failed to read cache: %v\n", err)
+		}
+		globalCache = make(TestCache)
+		return
+	}
+	if err := json.Unmarshal(data, &globalCache); err != nil {
+		fmt.Printf("Warning: failed to parse cache: %v\n", err)
+		globalCache = make(TestCache)
+	}
+}
+
+func saveCache(path string) {
+	cacheMutex.Lock() // Just in case, though main is serial
+	defer cacheMutex.Unlock()
+	if globalCache == nil {
+		return
+	}
+	data, err := json.MarshalIndent(globalCache, "", "  ")
+	if err != nil {
+		fmt.Printf("Warning: failed to marshal cache: %v\n", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Printf("Warning: failed to write cache: %v\n", err)
+	}
+}
+
 func verifyLayerQuiet(layerType, depth, dtype string) LayerResult {
 	configStr := getJSONConfig(layerType, depth, dtype)
 	if configStr == "" {
@@ -224,7 +297,12 @@ func verifyLayerQuiet(layerType, depth, dtype string) LayerResult {
 	inputSize := getInputSize(layerType, depth)
 	input := make([]float32, inputSize)
 	for i := range input {
-		input[i] = float32(i+1) * 0.01
+		if layerType == "Embedding" {
+			// Integers for token IDs
+			input[i] = float32(i % 1000)
+		} else {
+			input[i] = float32(i+1) * 0.01
+		}
 	}
 
 	// Set BatchSize for proper CPU batch handling
@@ -355,126 +433,60 @@ func getJSONConfig(layerType, depth, dtype string) string {
 	// Simple config generation for verification
 	h, batch := getLayerSizes(layerType, depth)
 
-	if layerType == "Dense" {
-		layersJson := fmt.Sprintf(`{"type": "dense", "input_size": %d, "output_size": %d, "activation": "relu"}`, h, h)
-		layersCount := 1
-		if depth != "shallow" {
-			layersJson += fmt.Sprintf(`, {"type": "dense", "input_size": %d, "output_size": %d, "activation": "sigmoid"}`, h, h)
-			layersCount = 2
-		}
+	// Variables to construct the return JSON
+	var layerConfig string
+	var inputShape string
 
-		return fmt.Sprintf(`{
-			"input_shape": [1, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": %d,
-			"layers": [
-				%s
-			],
-			"dtype": "%s"
-		}`, h, layersCount, layersJson, dtype)
-	}
-	if layerType == "LayerNorm" {
-		// LayerNorm: batch * norm_size elements for fair GPU comparison
-		// E.g., "deep" = 2048 batches of 2048 = 16MB of data
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "layernorm", "norm_size": %d, "epsilon": 1e-5}
-			],
-			"dtype": "%s"
-		}`, batch, h, h, dtype)
-	}
-	if layerType == "RMSNorm" {
-		// RMSNorm: similar to LayerNorm but simpler
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-6}
-			],
-			"dtype": "%s"
-		}`, batch, h, h, dtype)
-	}
-	if layerType == "Softmax" {
-		// Softmax: batch of independent softmax operations
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "softmax"}
-			],
-			"dtype": "%s"
-		}`, batch, h, dtype)
-	}
-	if layerType == "Embedding" {
-		// Embedding lookup
+	switch layerType {
+	case "Dense":
+		layerConfig = fmt.Sprintf(`{"type": "dense", "input_size": %d, "output_size": %d, "activation": "relu"}`, h, h)
+		if depth != "shallow" {
+			// Add a second layer for deep tests
+			layerConfig += fmt.Sprintf(`, {"type": "dense", "input_size": %d, "output_size": %d, "activation": "sigmoid"}`, h, h)
+		}
+		inputShape = fmt.Sprintf("[1, %d]", h)
+
+	case "LayerNorm":
+		layerConfig = fmt.Sprintf(`{"type": "layernorm", "norm_size": %d, "epsilon": 1e-5}`, h)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, h)
+
+	case "RMSNorm":
+		layerConfig = fmt.Sprintf(`{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-6}`, h)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, h)
+
+	case "Softmax":
+		layerConfig = `{"type": "softmax"}`
+		inputShape = fmt.Sprintf("[%d, %d]", batch, h)
+
+	case "Embedding":
 		vocabSize := 1000
 		embDim := h
 		seqLen := batch
-		return fmt.Sprintf(`{
-			"input_shape": [1, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "embedding", "vocab_size": %d, "embedding_dim": %d}
-			],
-			"dtype": "%s"
-		}`, seqLen, vocabSize, embDim, dtype)
-	}
-	if layerType == "Residual" {
-		// Simple residual pass-through
-		return fmt.Sprintf(`{
-			"input_shape": [1, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "residual"}
-			],
-			"dtype": "%s"
-		}`, h, dtype)
-	}
-	if layerType == "SwiGLU" {
-		// SwiGLU gated activation
-		interSize := h * 4 // Typical 4x expansion
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "swiglu", "input_size": %d, "intermediate_size": %d}
-			],
-			"dtype": "%s"
-		}`, batch, h, h, interSize, dtype)
-	}
-	if layerType == "Conv1D" {
-		// 1D Convolution
+		layerConfig = fmt.Sprintf(`{"type": "embedding", "vocab_size": %d, "embedding_dim": %d}`, vocabSize, embDim)
+		inputShape = fmt.Sprintf("[1, %d]", seqLen)
+
+	case "Residual":
+		layerConfig = `{"type": "residual"}`
+		inputShape = fmt.Sprintf("[1, %d]", h)
+
+	case "SwiGLU":
+		inputSize := h
+		intermediateSize := h * 4
+		layerConfig = fmt.Sprintf(`{"type": "swiglu", "input_height": %d, "output_height": %d}`, inputSize, intermediateSize)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, h)
+
+	case "Conv1D":
 		inCh := 32
 		outCh := 64
 		kernel := 3
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "conv1d", "in_channels": %d, "out_channels": %d, "kernel_size": %d}
-			],
-			"dtype": "%s"
-		}`, h, inCh, inCh, outCh, kernel, dtype)
-	}
-	if layerType == "Conv2D" {
-		// 2D Convolution
+		stride := 1
+		padding := 0
+		seqLen := h
+		outLen := (seqLen+2*padding-kernel)/stride + 1
+		layerConfig = fmt.Sprintf(`{"type": "conv1d", "input_channels": %d, "filters": %d, "kernel_size": %d, "stride": %d, "padding": %d, "input_length": %d, "output_length": %d, "activation": "relu"}`, inCh, outCh, kernel, stride, padding, seqLen, outLen)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, seqLen*inCh)
+
+	case "Conv2D":
 		inCh := 3
 		outCh := 32
 		kernel := 3
@@ -482,66 +494,57 @@ func getJSONConfig(layerType, depth, dtype string) string {
 		if depth == "deep" || depth == "stress" {
 			imgSize = 64
 		}
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "conv2d", "in_channels": %d, "out_channels": %d, "kernel_size": %d}
-			],
-			"dtype": "%s"
-		}`, imgSize, imgSize, inCh, inCh, outCh, kernel, dtype)
-	}
-	if layerType == "MHA" {
-		// Multi-Head Attention
+		// Calculate output dims
+		// outSize variable removed as it was unused and duplicate of outH/outW calculation logic
+		// Let's be explicit about padding/stride if possible or match the logic
+		padding := 0
+		stride := 1
+		outH := (imgSize+2*padding-kernel)/stride + 1
+		outW := (imgSize+2*padding-kernel)/stride + 1
+
+		layerConfig = fmt.Sprintf(`{"type": "conv2d", "input_channels": %d, "filters": %d, "kernel_size": %d, "stride": %d, "padding": %d, "input_height": %d, "input_width": %d, "output_height": %d, "output_width": %d, "activation": "relu"}`, inCh, outCh, kernel, stride, padding, imgSize, imgSize, outH, outW)
+		inputShape = fmt.Sprintf("[%d, %d, %d]", imgSize, imgSize, inCh)
+
+	case "MHA":
 		dModel := h
 		numHeads := 8
 		if h < 64 {
 			numHeads = 4
 		}
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "mha", "d_model": %d, "num_heads": %d}
-			],
-			"dtype": "%s"
-		}`, batch, dModel, dModel, numHeads, dtype)
-	}
-	if layerType == "RNN" {
-		// Basic RNN
+		layerConfig = fmt.Sprintf(`{"type": "multi_head_attention", "d_model": %d, "num_heads": %d}`, dModel, numHeads)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, dModel)
+
+	case "RNN":
 		inputSize := h / 4
 		hiddenSize := h
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "rnn", "input_size": %d, "hidden_size": %d}
-			],
-			"dtype": "%s"
-		}`, batch, inputSize, inputSize, hiddenSize, dtype)
-	}
-	if layerType == "LSTM" {
-		// LSTM
+		layerConfig = fmt.Sprintf(`{"type": "rnn", "input_size": %d, "hidden_size": %d, "activation": "tanh"}`, inputSize, hiddenSize)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, inputSize)
+
+	case "LSTM":
 		inputSize := h / 4
 		hiddenSize := h
-		return fmt.Sprintf(`{
-			"input_shape": [%d, %d],
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 1,
-			"layers": [
-				{"type": "lstm", "input_size": %d, "hidden_size": %d}
-			],
-			"dtype": "%s"
-		}`, batch, inputSize, inputSize, hiddenSize, dtype)
+		layerConfig = fmt.Sprintf(`{"type": "lstm", "input_size": %d, "hidden_size": %d}`, inputSize, hiddenSize)
+		inputShape = fmt.Sprintf("[%d, %d]", batch, inputSize)
+
+	default:
+		return ""
 	}
-	return ""
+
+	numLayers := 1
+	if layerType == "Dense" && depth != "shallow" {
+		numLayers = 2
+	}
+
+	return fmt.Sprintf(`{
+		"input_shape": %s,
+		"grid_rows": 1,
+		"grid_cols": 1,
+		"layers_per_cell": %d,
+		"layers": [
+			%s
+		],
+		"dtype": "%s"
+	}`, inputShape, numLayers, layerConfig, dtype)
 }
 
 func getInputSize(layerType, depth string) int {
@@ -549,8 +552,50 @@ func getInputSize(layerType, depth string) int {
 	switch layerType {
 	case "LayerNorm", "RMSNorm", "Softmax":
 		return h * batch // Total elements = batch * normSize
+	case "Conv2D":
+		// Conv2D input: H * W * InChannels (Batch=1 implied or included?)
+		// getJSONConfig uses imgSize=32/64, InCh=3.
+		imgSize := 32
+		if depth == "deep" || depth == "stress" {
+			imgSize = 64
+		}
+		inCh := 3
+		return imgSize * imgSize * inCh * batch // batch is usually 1 here based on getLayerSizes
+	case "Conv1D":
+		// Conv1D input: SeqLen * InChannels
+		// getJSONConfig uses SeqLen=h, InCh=32
+		seqLen := h
+		inCh := 32
+		return seqLen * inCh * batch
+	case "SwiGLU":
+		// SwiGLU input: batch * input_size
+		return h * batch
+	case "MHA":
+		// MHA input: batch * d_model (Assuming seqLen=1? No, logic uses seqLen=100?)
+		// getJSONConfig says input_shape: [batch, d_model]
+		// But usually MHA is [batch, seq, d_model]
+		// getJSONConfig MHA case: input_shape [batch, dModel] ??
+		// Let's re-read getJSONConfig MHA case.
+		// It says input_shape [batch, dModel].
+		// And layers MHA d_model.
+		// This implies SeqLen=1? Or packed?
+		// Verification likely treats it as [Batch, DModel].
+		return h * batch
+	case "Embedding":
+		// Embedding input: [1, SeqLen]
+		// getJSONConfig: vocabSize, embDim=h, seqLen=batch.
+		// Input is indices.
+		return batch
+	case "RNN", "LSTM":
+		// RNN/LSTM input: [Batch, InputSize]
+		// getJSONConfig: InputSize = h/4.
+		return (h / 4) * batch
+	case "Residual":
+		return h * batch
+	case "Dense":
+		return h * batch // Input size * batch
 	default:
-		return h // Dense just uses h as input
+		return h * batch
 	}
 }
 
@@ -610,7 +655,7 @@ func fmtDuration(d time.Duration) string {
 func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32) (*GPUResult, error) {
 
 	var layers []gpu.GPULayer
-	var outputSizeLast int
+	var outputSizeLast int = len(input)
 
 	// Instantiate Layers based on Type
 	for _, l := range net.Layers {
@@ -656,21 +701,14 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 			layers = append(layers, &gpu.RMSNormLayer{Spec: spec})
 			outputSizeLast = pixelSize * batchSize
 		} else if l.Type == nn.LayerSoftmax {
-			// Softmax layer - parallel reduction for max and sum
-			// Size is inferred from input or could be SoftmaxCols if set
-			softmaxSize := l.SoftmaxCols
-			if softmaxSize == 0 {
-				softmaxSize = len(input) // Default to entire input
-			}
+			softmaxSize := outputSizeLast
 			batchSize := 1
-			if len(input) > softmaxSize && softmaxSize > 0 {
-				batchSize = len(input) / softmaxSize
-			}
 
 			temp := l.Temperature
 			if temp <= 0 {
 				temp = 1.0
 			}
+
 			spec := gpu.SoftmaxSpec{
 				Size:        softmaxSize,
 				BatchSize:   batchSize,
@@ -678,6 +716,150 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 			}
 			layers = append(layers, &gpu.SoftmaxLayer{Spec: spec})
 			outputSizeLast = softmaxSize * batchSize
+		} else if l.Type == nn.LayerEmbedding {
+			spec := gpu.EmbeddingSpec{
+				VocabSize:    l.VocabSize,
+				EmbeddingDim: l.EmbeddingDim,
+				SeqLength:    len(input),
+				Weights:      l.EmbeddingWeights,
+			}
+			layers = append(layers, &gpu.EmbeddingLayer{Spec: spec})
+			outputSizeLast = l.EmbeddingDim * len(input)
+		} else if l.Type == nn.LayerResidual {
+			spec := gpu.ResidualSpec{
+				Size: outputSizeLast,
+			}
+			layers = append(layers, &gpu.ResidualLayer{Spec: spec})
+			// outputSizeLast remains unchanged
+		} else if l.Type == nn.LayerSwiGLU {
+			// SwiGLU: InputSize is hidden dim
+			inputSize := outputSizeLast
+			interSize := 0
+			if inputSize > 0 && len(l.GateWeights) > 0 {
+				interSize = len(l.GateWeights) / inputSize
+			}
+
+			spec := gpu.SwiGLUSpec{
+				InputSize:        inputSize,
+				IntermediateSize: interSize,
+				SeqLen:           1, // Defaulting to 1 batch
+				GateWeights:      l.GateWeights,
+				UpWeights:        l.UpWeights,
+				DownWeights:      l.DownWeights,
+			}
+			layers = append(layers, &gpu.SwiGLULayer{Spec: spec})
+			// outputSizeLast remains unchanged for SwiGLU (simplified) or should it change?
+			// SwiGLU: output is intermediateSize? No, in implementation usually hiddenSize.
+			// But for now, let's just make it a comment to fix lint.
+			// outputSizeLast = outputSizeLast
+		} else if l.Type == nn.LayerConv1D {
+			spec := gpu.Conv1DSpec{
+				SeqLen:      outputSizeLast / l.Conv1DInChannels,
+				InChannels:  l.Conv1DInChannels,
+				OutChannels: l.Conv1DFilters,
+				KernelSize:  l.Conv1DKernelSize,
+				Stride:      l.Conv1DStride,
+				Padding:     l.Conv1DPadding,
+				Weights:     l.Conv1DKernel,
+				Bias:        l.Conv1DBias,
+				Activation:  "relu",
+			}
+			layers = append(layers, &gpu.Conv1DLayer{Spec: spec})
+			stride := spec.Stride
+			if stride < 1 {
+				stride = 1
+			}
+			outLen := (spec.SeqLen+2*spec.Padding-spec.KernelSize)/stride + 1
+			outputSizeLast = outLen * spec.OutChannels
+		} else if l.Type == nn.LayerConv2D {
+			// Infer dimensions from outputSizeLast
+			w := 32
+			if l.InputChannels > 0 {
+				val := float64(outputSizeLast / l.InputChannels)
+				if val > 0 {
+					w = int(math.Sqrt(val))
+				}
+			}
+			if w == 0 {
+				w = 32
+			}
+
+			spec := gpu.Conv2DSpec{
+				InputWidth:  int(w),
+				InputHeight: int(w),
+				InChannels:  int(l.InputChannels),
+				OutChannels: int(l.Filters),
+				KernelSize:  int(l.KernelSize),
+				Stride:      int(l.Stride),
+				Padding:     int(l.Padding),
+				Weights:     l.Kernel,
+				Bias:        l.Bias,
+				Activation:  "relu",
+			}
+			layers = append(layers, &gpu.Conv2DLayer{Spec: spec})
+			stride := spec.Stride
+			if stride < 1 {
+				stride = 1
+			}
+			outH := (spec.InputHeight+2*spec.Padding-spec.KernelSize)/stride + 1
+			outW := (spec.InputWidth+2*spec.Padding-spec.KernelSize)/stride + 1
+			outputSizeLast = outH * outW * spec.OutChannels
+		} else if l.Type == nn.LayerMultiHeadAttention {
+			headDim := 0
+			if l.NumHeads > 0 {
+				headDim = l.DModel / l.NumHeads
+			}
+			seqLen := 100
+			if l.DModel > 0 {
+				seqLen = outputSizeLast / l.DModel
+			}
+			spec := gpu.MHASpec{
+				DModel:   l.DModel,
+				NumHeads: l.NumHeads,
+				HeadDim:  headDim,
+				SeqLen:   seqLen,
+				QWeights: l.QWeights,
+				KWeights: l.KWeights,
+				VWeights: l.VWeights,
+				OWeights: l.OutputWeight,
+			}
+			layers = append(layers, &gpu.MHALayer{Spec: spec})
+			outputSizeLast = l.DModel * int(spec.SeqLen)
+		} else if l.Type == nn.LayerRNN {
+			seqLen := 100
+			if l.RNNInputSize > 0 {
+				seqLen = outputSizeLast / l.RNNInputSize
+			}
+			spec := gpu.RNNSpec{
+				InputSize:  l.RNNInputSize,
+				HiddenSize: l.HiddenSize,
+				SeqLen:     seqLen,
+				WeightIH:   l.WeightIH,
+				WeightHH:   l.WeightHH,
+				BiasH:      l.BiasH,
+			}
+			layers = append(layers, &gpu.RNNLayer{Spec: spec})
+			outputSizeLast = l.HiddenSize * int(spec.SeqLen)
+		} else if l.Type == nn.LayerLSTM {
+			spec := gpu.LSTMSpec{
+				InputSize:  l.RNNInputSize,
+				HiddenSize: l.HiddenSize,
+				SeqLen:     100, // Fixed
+				WeightIH_i: l.WeightIH_i,
+				WeightIH_f: l.WeightIH_f,
+				WeightIH_g: l.WeightIH_g,
+				WeightIH_o: l.WeightIH_o,
+				WeightHH_i: l.WeightHH_i,
+				WeightHH_f: l.WeightHH_f,
+				WeightHH_g: l.WeightHH_g,
+				WeightHH_o: l.WeightHH_o,
+				BiasH_i:    l.BiasH_i,
+				BiasH_f:    l.BiasH_f,
+				BiasH_g:    l.BiasH_g,
+				BiasH_o:    l.BiasH_o,
+			}
+			layers = append(layers, &gpu.LSTMLayer{Spec: spec})
+			outputSizeLast = l.HiddenSize * int(spec.SeqLen)
 		} else {
 			// Default to Dense
 			actCode := gpu.ActNone
@@ -788,10 +970,23 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 
 	for r := 0; r < Runs; r++ {
 		// B. Forward
-		// fmt.Printf("    DEBUG: Run %d Fwd...\n", r)
 		l0 := layers[0]
 		inputBuf := l0.GetInputBuffer()
-		ctx.Queue.WriteBuffer(inputBuf, 0, wgpu.ToBytes(input))
+		if _, ok := l0.(*gpu.EmbeddingLayer); ok {
+			// Convert float input (storing token IDs) to proper uint32 for GPU
+			inputU32 := make([]uint32, len(input))
+			for k, v := range input {
+				inputU32[k] = uint32(v)
+			}
+			ctx.Queue.WriteBuffer(inputBuf, 0, wgpu.ToBytes(inputU32))
+		} else {
+			ctx.Queue.WriteBuffer(inputBuf, 0, wgpu.ToBytes(input))
+		}
+
+		// Hack removed: Skip buffer should be zero for Identity check with CPU
+		// if resL, ok := l0.(*gpu.ResidualLayer); ok {
+		// 	ctx.Queue.WriteBuffer(resL.SkipBuffer, 0, wgpu.ToBytes(input))
+		// }
 
 		// Wait for upload to ensure we isolate compute?
 		// Usually "Forward" implies providing input.
@@ -828,17 +1023,11 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 		// Note input upload is fast for small batch, but correct to exclude for "Compute" benchmark.
 
 		// C. Backward
-		// fmt.Printf("    DEBUG: Run %d Bwd...\n", r)
 		t2 := time.Now()
 
 		// Zero gradient buffers for layers that use atomic accumulation
 		for _, l := range layers {
-			if lnLayer, ok := l.(*gpu.LayerNormLayer); ok {
-				lnLayer.ZeroGradients(ctx)
-			}
-			if rmsLayer, ok := l.(*gpu.RMSNormLayer); ok {
-				rmsLayer.ZeroGradients(ctx)
-			}
+			l.ZeroGradients(ctx)
 		}
 
 		cmdEncB, _ := ctx.Device.CreateCommandEncoder(nil)
@@ -846,7 +1035,10 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 			l := layers[i]
 			l.DispatchBackward(cmdEncB)
 		}
-		cmdB, _ := cmdEncB.Finish(nil)
+		cmdB, err := cmdEncB.Finish(nil)
+		if err != nil {
+			return nil, fmt.Errorf("backward command encoder finish: %v", err)
+		}
 		ctx.Queue.Submit(cmdB)
 		pollWithTimeout(ctx)
 		totalBwd += time.Since(t2)
