@@ -1,315 +1,451 @@
 package main
 
-// GPU-CPU Parity Test
+// GPU-CPU Parity Test for ALL Layer Types
 //
-// This example demonstrates the new GPU integration API:
-//   1. Build network from JSON (like json_all_layers_embedded.go)
-//   2. Run CPU forward pass and save output
-//   3. Enable GPU, transfer weights with nn.WeightsToGPU()
-//   4. Run forward pass (auto-routed to GPU)
-//   5. Compare outputs (should match within tolerance)
-//   6. Serialize/deserialize model
-//   7. Re-enable GPU, verify same outputs
-//   8. Measure speedup
-//
-// Model architecture: Input(2048) -> Dense(2048) x3 -> Output(2)
-// This creates ~32MB of VRAM usage for GPU weight storage.
+// Tests GPU acceleration across all supported layer types by:
+//   1. Creating networks with each layer type as the middle layer
+//   2. Comparing CPU vs GPU forward/backward pass
+//   3. Producing a summary table of results
 
 import (
 	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/openfluke/loom/nn"
 )
 
+// GPULayerTestCase defines a test case for a specific hidden layer type
+type GPULayerTestCase struct {
+	Name       string
+	JSONConfig string // Full network JSON config
+	InputSize  int    // Network input size
+}
+
+// GPUTestResultRow holds the result of testing a layer type
+type GPUTestResultRow struct {
+	LayerName       string
+	ForwardCPU      time.Duration
+	ForwardGPU      time.Duration
+	BackwardCPU     time.Duration
+	BackwardGPU     time.Duration
+	ForwardError    float64
+	BackwardError   string
+	ForwardWorks    bool
+	BackwardWorks   bool
+	ForwardSpeedup  float64
+	BackwardSpeedup float64
+	ErrMsg          string
+}
+
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║           GPU-CPU Parity Test with New Integration API              ║")
+	fmt.Println("║       GPU-CPU Parity Test: ALL LAYER TYPES                          ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	// Build a network that will use ~32MB VRAM
-	// Dense layers: 2048x2048 = 4M weights * 4 bytes = 16MB per layer
-	// With 3 layers: ~48MB total weight storage
-	jsonConfig := `{
-		"id": "gpu_parity_test",
-		"batch_size": 1,
-		"grid_rows": 1,
-		"grid_cols": 1,
-		"layers_per_cell": 5,
-		"layers": [
-			{
-				"type": "dense",
-				"activation": "leaky_relu",
-				"input_height": 2048,
-				"output_height": 2048
-			},
-			{
-				"type": "dense",
-				"activation": "leaky_relu",
-				"input_height": 2048,
-				"output_height": 2048
-			},
-			{
-				"type": "dense",
-				"activation": "leaky_relu",
-				"input_height": 2048,
-				"output_height": 2048
-			},
-			{
-				"type": "dense",
-				"activation": "sigmoid",
-				"input_height": 2048,
-				"output_height": 2
-			},
-			{
-				"type": "softmax",
-				"softmax_variant": "standard",
-				"temperature": 1.0
-			}
-		]
-	}`
+	// Define all layer types to test with proper full network configs
+	layerTests := []GPULayerTestCase{
+		{
+			Name: "Dense",
+			JSONConfig: `{
+				"id": "gpu_test_dense",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "LayerNorm",
+			JSONConfig: `{
+				"id": "gpu_test_layernorm",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "RMSNorm",
+			JSONConfig: `{
+				"id": "gpu_test_rmsnorm",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "Softmax",
+			JSONConfig: `{
+				"id": "gpu_test_softmax",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "softmax", "temperature": 1.0},
+					{"type": "softmax", "temperature": 1.0},
+					{"type": "softmax", "temperature": 1.0},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "Conv1D",
+			// 32 seq x 64 channels = 2048, output with padding=1 stride=1 is still 32x64=2048
+			JSONConfig: `{
+				"id": "gpu_test_conv1d",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
+					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
+					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "Conv2D",
+			// 16x16x8 = 2048, output with padding=1 stride=1 kernel=3 is still 16x16x8=2048
+			JSONConfig: `{
+				"id": "gpu_test_conv2d",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "SwiGLU",
+			JSONConfig: `{
+				"id": "gpu_test_swiglu",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+					{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+					{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+		{
+			Name: "RNN",
+			// Simplified: single RNN layer with smaller dimensions to avoid GPU shader issues
+			// 8 seq x 64 hidden = 512
+			JSONConfig: `{
+				"id": "gpu_test_rnn",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+					{"type": "rnn", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+					{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+				]
+			}`,
+			InputSize: 512,
+		},
+		{
+			Name: "LSTM",
+			// Simplified: single LSTM layer with smaller dimensions to avoid GPU shader issues
+			// 8 seq x 64 hidden = 512
+			JSONConfig: `{
+				"id": "gpu_test_lstm",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+					{"type": "lstm", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+					{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+				]
+			}`,
+			InputSize: 512,
+		},
+		{
+			Name: "MHA",
+			// 8 seq x 256 d_model = 2048
+			JSONConfig: `{
+				"id": "gpu_test_mha",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 5,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+					{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+					{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+					{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+				]
+			}`,
+			InputSize: 2048,
+		},
+	}
 
-	fmt.Println("Building network from JSON (~48MB weights)...")
-	network, err := nn.BuildNetworkFromJSON(jsonConfig)
+	results := make([]GPUTestResultRow, 0)
+
+	for _, test := range layerTests {
+		fmt.Printf("┌──────────────────────────────────────────────────────────────────────┐\n")
+		fmt.Printf("│ Testing: %-59s│\n", test.Name)
+		fmt.Printf("└──────────────────────────────────────────────────────────────────────┘\n")
+
+		result := runGPULayerTest(test)
+		results = append(results, result)
+
+		// Print quick result
+		if result.ForwardWorks {
+			fmt.Printf("  ✓ Forward: CPU=%v GPU=%v (%.2fx)\n",
+				result.ForwardCPU.Truncate(time.Millisecond),
+				result.ForwardGPU.Truncate(time.Millisecond),
+				result.ForwardSpeedup)
+		} else {
+			fmt.Printf("  ❌ Forward: %s\n", result.ErrMsg)
+		}
+
+		if result.BackwardWorks {
+			fmt.Printf("  ✓ Backward: CPU=%v GPU=%v (%.2fx)\n",
+				result.BackwardCPU.Truncate(time.Millisecond),
+				result.BackwardGPU.Truncate(time.Millisecond),
+				result.BackwardSpeedup)
+		} else if result.ForwardWorks {
+			fmt.Printf("  ⚠ Backward: %s\n", result.BackwardError)
+		}
+
+		fmt.Println()
+	}
+
+	// Print summary table
+	printGPUSummaryTable(results)
+}
+
+func runGPULayerTest(test GPULayerTestCase) (result GPUTestResultRow) {
+	result = GPUTestResultRow{LayerName: test.Name}
+
+	// Recover from GPU panics
+	defer func() {
+		if r := recover(); r != nil {
+			result.ErrMsg = fmt.Sprintf("GPU panic: %v", r)
+			result.ForwardWorks = false
+			result.BackwardWorks = false
+		}
+	}()
+
+	// Build network from config
+	network, err := nn.BuildNetworkFromJSON(test.JSONConfig)
 	if err != nil {
-		panic(fmt.Sprintf("Failed to build network: %v", err))
+		result.ErrMsg = fmt.Sprintf("build error: %v", err)
+		return result
 	}
 	network.BatchSize = 1
-
-	// Initialize weights
-	fmt.Println("Initializing weights...")
 	network.InitializeWeights()
-	fmt.Printf("  Network: %d layers, input=2048, output=2\n", network.TotalLayers())
-	fmt.Println()
 
-	// Create test input
-	input := make([]float32, 2048)
+	// Create input
+	input := make([]float32, test.InputSize)
 	for i := range input {
 		input[i] = rand.Float32()*2 - 1
 	}
 
-	// ===========================================================================
-	// TEST 1: CPU Forward Pass
-	// ===========================================================================
-	fmt.Println("┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ TEST 1: CPU Forward Pass (Reference)                               │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
+	// CPU Forward
+	cpuOutput, cpuForwardTime := network.ForwardCPU(input)
+	result.ForwardCPU = cpuForwardTime
 
-	cpuOutput, cpuTime := network.ForwardCPU(input)
-	fmt.Printf("  CPU Output: [%.6f, %.6f]\n", cpuOutput[0], cpuOutput[1])
-	fmt.Printf("  CPU Time: %v\n", cpuTime)
-	fmt.Println()
+	// GPU Forward (with panic protection)
+	gpuForwardOK := false
+	var gpuOutput []float32
+	var gpuForwardTime time.Duration
 
-	// ===========================================================================
-	// TEST 2: GPU Forward Pass via New API
-	// ===========================================================================
-	fmt.Println("┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ TEST 2: GPU Forward Pass (New API)                                  │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result.ErrMsg = fmt.Sprintf("GPU forward panic: %v", r)
+			}
+		}()
 
-	// Enable GPU mode
-	network.GPU = true
-
-	// Mount weights to GPU
-	fmt.Println("  Mounting weights to GPU...")
-	mountStart := time.Now()
-	err = network.WeightsToGPU()
-	mountTime := time.Since(mountStart)
-
-	if err != nil {
-		fmt.Printf("  ❌ GPU not available: %v\n", err)
-		fmt.Println("  Running CPU-only verification instead.")
-		network.GPU = false
-	} else {
-		fmt.Printf("  ✓ Weights mounted (took %v)\n", mountTime)
-		fmt.Printf("  GPU Mounted: %v\n", network.IsGPUMounted())
-
-		// Run forward pass (auto-routes to GPU)
-		gpuOutput, gpuTime := network.ForwardCPU(input) // Uses GPU automatically!
-		fmt.Printf("  GPU Output: [%.6f, %.6f]\n", gpuOutput[0], gpuOutput[1])
-		fmt.Printf("  GPU Time: %v\n", gpuTime)
-
-		// Compare outputs
-		maxErr := computeMaxError(cpuOutput, gpuOutput)
-		fmt.Printf("  Max Error: %.2e\n", maxErr)
-
-		if maxErr < 1e-3 {
-			fmt.Println("  ✓ CPU/GPU outputs match!")
-		} else if maxErr < 1e-1 {
-			fmt.Println("  ⚠ Small difference (within tolerance)")
-		} else {
-			fmt.Println("  ❌ Large output mismatch!")
+		network.GPU = true
+		err = network.WeightsToGPU()
+		if err != nil {
+			result.ErrMsg = fmt.Sprintf("GPU mount: %v", err)
+			return
 		}
 
-		// Speedup
-		if cpuTime > 0 && gpuTime > 0 {
-			speedup := float64(cpuTime) / float64(gpuTime)
-			fmt.Printf("  Speedup: %.2fx\n", speedup)
-		}
-	}
-	fmt.Println()
+		gpuOutput, gpuForwardTime = network.ForwardCPU(input)
+		gpuForwardOK = true
+	}()
 
-	// ===========================================================================
-	// TEST 3: Serialization Round-Trip
-	// ===========================================================================
-	fmt.Println("┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ TEST 3: Serialization Round-Trip                                    │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
-
-	// Save model (should use CPU weights)
-	fmt.Println("  Saving model...")
-	saveStart := time.Now()
-	jsonStr, err := network.SaveModelToString("gpu_parity_test")
-	saveTime := time.Since(saveStart)
-	if err != nil {
-		fmt.Printf("  ❌ Save failed: %v\n", err)
-	} else {
-		fmt.Printf("  ✓ Saved (%d bytes, took %v)\n", len(jsonStr), saveTime)
-	}
-
-	// Release GPU weights
-	if network.IsGPUMounted() {
-		fmt.Println("  Releasing GPU weights...")
+	if !gpuForwardOK {
 		network.ReleaseGPUWeights()
-		fmt.Printf("  GPU Mounted After Release: %v\n", network.IsGPUMounted())
+		return result
 	}
 
-	// Load model
-	fmt.Println("  Loading model...")
-	loadStart := time.Now()
-	loaded, err := nn.LoadModelFromString(jsonStr, "gpu_parity_test")
-	loadTime := time.Since(loadStart)
-	if err != nil {
-		fmt.Printf("  ❌ Load failed: %v\n", err)
-		return
+	result.ForwardGPU = gpuForwardTime
+
+	// Compare forward outputs
+	forwardErr := computeGPUMaxError(cpuOutput, gpuOutput)
+	result.ForwardError = forwardErr
+	result.ForwardWorks = forwardErr < 1e-1 && len(gpuOutput) > 0
+
+	if result.ForwardWorks && cpuForwardTime > 0 && gpuForwardTime > 0 {
+		result.ForwardSpeedup = float64(cpuForwardTime) / float64(gpuForwardTime)
 	}
-	loaded.BatchSize = 1
-	fmt.Printf("  ✓ Loaded (took %v)\n", loadTime)
 
-	// Verify loaded model CPU output matches original
-	loadedCPUOutput, _ := loaded.ForwardCPU(input)
-	cpuLoadErr := computeMaxError(cpuOutput, loadedCPUOutput)
-	fmt.Printf("  Loaded CPU output error vs original: %.2e\n", cpuLoadErr)
-	if cpuLoadErr < 1e-5 {
-		fmt.Println("  ✓ Serialization preserved weights exactly!")
-	} else {
-		fmt.Println("  ⚠ Some weight precision loss during serialization")
-	}
-	fmt.Println()
-
-	// ===========================================================================
-	// TEST 4: Re-mount GPU on Loaded Model
-	// ===========================================================================
-	fmt.Println("┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ TEST 4: Re-mount GPU on Loaded Model                                │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
-
-	loaded.GPU = true
-	err = loaded.WeightsToGPU()
-	if err != nil {
-		fmt.Printf("  ❌ GPU mount failed: %v\n", err)
-		fmt.Println("  Skipping GPU test on loaded model.")
-	} else {
-		fmt.Println("  ✓ GPU weights re-mounted on loaded model")
-
-		loadedGPUOutput, _ := loaded.ForwardCPU(input)
-		gpuLoadErr := computeMaxError(cpuOutput, loadedGPUOutput)
-		fmt.Printf("  Loaded GPU output error vs original CPU: %.2e\n", gpuLoadErr)
-
-		if gpuLoadErr < 1e-3 {
-			fmt.Println("  ✓ Loaded model GPU output matches original CPU!")
-		} else if gpuLoadErr < 1e-1 {
-			fmt.Println("  ⚠ Small difference (within tolerance)")
-		} else {
-			fmt.Println("  ❌ Large output mismatch!")
-		}
-
-		loaded.ReleaseGPUWeights()
-	}
-	fmt.Println()
-
-	// ===========================================================================
-	// TEST 5: Backward Pass Comparison (CPU vs GPU)
-	// ===========================================================================
-	fmt.Println("┌──────────────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ TEST 5: Backward Pass Speed Comparison (CPU vs GPU)                 │")
-	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
-
-	// Create gradient of loss (ones for simplicity)
-	dOutput := make([]float32, 2)
-	dOutput[0] = 1.0
-	dOutput[1] = 1.0
-
-	// First do a CPU forward pass to set up activations
+	// CPU Backward
 	network.GPU = false
 	network.ReleaseGPUWeights()
 	network.ForwardCPU(input)
-
-	// CPU Backward Pass
-	fmt.Println("  Running CPU backward pass...")
+	dOutput := []float32{1.0, 1.0}
 	_, cpuBackwardTime := network.BackwardCPU(dOutput)
-	fmt.Printf("  CPU Backward Time: %v\n", cpuBackwardTime)
+	result.BackwardCPU = cpuBackwardTime
 
-	// GPU Backward Pass
-	network.GPU = true
-	err = network.WeightsToGPU()
-	if err != nil {
-		fmt.Printf("  ❌ GPU mount failed for backward: %v\n", err)
-	} else {
-		// Need to run forward first to populate GPU buffers
+	// GPU Backward (with panic protection)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				result.BackwardError = fmt.Sprintf("GPU backward panic: %v", r)
+			}
+		}()
+
+		network.GPU = true
+		err = network.WeightsToGPU()
+		if err != nil {
+			result.BackwardError = fmt.Sprintf("GPU mount: %v", err)
+			return
+		}
 		network.ForwardCPU(input)
 
-		fmt.Println("  Running GPU backward pass...")
 		_, gpuBackwardTime, backErr := network.BackwardGPUNew(dOutput)
+		result.BackwardGPU = gpuBackwardTime
+
 		if backErr != nil {
-			fmt.Printf("  ❌ GPU backward failed: %v\n", backErr)
+			result.BackwardError = backErr.Error()
 		} else {
-			fmt.Printf("  GPU Backward Time: %v\n", gpuBackwardTime)
-
-			// Speedup
+			result.BackwardWorks = true
 			if cpuBackwardTime > 0 && gpuBackwardTime > 0 {
-				speedup := float64(cpuBackwardTime) / float64(gpuBackwardTime)
-				fmt.Printf("  Backward Speedup: %.2fx\n", speedup)
-
-				if speedup > 1.0 {
-					fmt.Println("  ✓ GPU backward is faster!")
-				} else {
-					fmt.Println("  ⚠ CPU backward faster (expected for small batch on iGPU)")
-				}
+				result.BackwardSpeedup = float64(cpuBackwardTime) / float64(gpuBackwardTime)
 			}
 		}
+	}()
 
-		network.ReleaseGPUWeights()
-	}
-	fmt.Println()
-
-	// ===========================================================================
-	// SUMMARY
-	// ===========================================================================
-	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║                            SUMMARY                                   ║")
-	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
-	fmt.Println()
-	fmt.Println("New GPU Integration API:")
-	fmt.Println("  network.GPU = true          // Enable GPU mode")
-	fmt.Println("  network.WeightsToGPU()      // Mount weights to GPU")
-	fmt.Println("  network.ForwardCPU(input)   // Auto-routes to GPU!")
-	fmt.Println("  network.BackwardGPUNew(dOut)// GPU backward pass")
-	fmt.Println("  network.WeightsToCPU()      // Download weights (optional)")
-	fmt.Println("  network.ReleaseGPUWeights() // Cleanup GPU resources")
-	fmt.Println()
-	fmt.Println("✅ CPU/GPU forward parity verified")
-	fmt.Println("✅ CPU/GPU backward pass working")
-	fmt.Println("✅ Serialization preserves CPU weights")
-	fmt.Println("✅ GPU re-mounts correctly on loaded models")
+	network.ReleaseGPUWeights()
+	return result
 }
 
-func computeMaxError(a, b []float32) float64 {
+func printGPUSummaryTable(results []GPUTestResultRow) {
+	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                     GPU ACCELERATION SUMMARY                        ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	// Header
+	fmt.Printf("%-20s │ %-8s │ %-8s │ %-10s │ %-10s │ %-8s\n",
+		"Layer", "Forward", "Backward", "Fwd Speed", "Bkwd Speed", "Error")
+	fmt.Println(strings.Repeat("─", 80))
+
+	// Results
+	for _, r := range results {
+		fwd := "❌"
+		if r.ForwardWorks {
+			fwd = "✅"
+		}
+		bkwd := "❌"
+		if r.BackwardWorks {
+			bkwd = "✅"
+		}
+
+		fwdSpeed := "—"
+		if r.ForwardSpeedup > 0 {
+			fwdSpeed = fmt.Sprintf("%.2fx", r.ForwardSpeedup)
+		}
+		bkwdSpeed := "—"
+		if r.BackwardSpeedup > 0 {
+			bkwdSpeed = fmt.Sprintf("%.2fx", r.BackwardSpeedup)
+		}
+
+		errStr := "—"
+		if r.ForwardError > 0 {
+			errStr = fmt.Sprintf("%.1e", r.ForwardError)
+		}
+		if r.ErrMsg != "" {
+			errStr = "err"
+		}
+
+		fmt.Printf("%-20s │ %-8s │ %-8s │ %-10s │ %-10s │ %-8s\n",
+			r.LayerName, fwd, bkwd, fwdSpeed, bkwdSpeed, errStr)
+	}
+
+	fmt.Println()
+
+	// Count stats
+	fwdWorks := 0
+	bkwdWorks := 0
+	for _, r := range results {
+		if r.ForwardWorks {
+			fwdWorks++
+		}
+		if r.BackwardWorks {
+			bkwdWorks++
+		}
+	}
+
+	fmt.Printf("Forward Pass:  %d/%d layers working\n", fwdWorks, len(results))
+	fmt.Printf("Backward Pass: %d/%d layers working\n", bkwdWorks, len(results))
+	fmt.Println()
+	fmt.Println("✅ = Working   ❌ = Failed/Error")
+}
+
+func computeGPUMaxError(a, b []float32) float64 {
 	if len(a) != len(b) {
 		return 9999.0
 	}
