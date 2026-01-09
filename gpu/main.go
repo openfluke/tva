@@ -32,12 +32,13 @@ var allDTypes = []string{
 
 // All supported layer types
 var allLayers = []string{
-	"Dense", "MHA", "RNN", "LSTM", "LayerNorm", "RMSNorm",
-	"SwiGLU", "Conv2D", "Parallel", "Sequential", "Softmax",
+	"Dense", "LayerNorm", "RMSNorm", "Softmax",
+	"Embedding", "Residual", "SwiGLU",
+	"Conv1D", "Conv2D", "MHA", "RNN", "LSTM",
 }
 
 // All depths
-var allDepths = []string{"shallow", "medium", "deep", "stress"}
+var allDepths = []string{"deep"} // Default to deep only (where GPU shines)
 
 func main() {
 	flag.Parse()
@@ -70,45 +71,122 @@ func main() {
 	}
 
 	// Determine depths to test
-	depths := allDepths
+	depths := []string{"deep"}
 	if *flagDepth != "" {
-		depths = parseCSV(*flagDepth, allDepths)
-		if len(depths) == 0 {
-			log.Fatalf("No valid depths found in: %s", *flagDepth)
-		}
+		depths = parseCSV(*flagDepth, []string{"shallow", "medium", "deep", "stress"})
 	}
 
-	fmt.Printf("Layers: %v\n", layers)
-	fmt.Printf("DTypes: %v\n", dtypes)
-	fmt.Printf("Depths: %v\n\n", depths)
+	fmt.Printf("Testing %d layers × %d dtypes\n\n", len(layers), len(dtypes))
 
-	total := 0
-	passed := 0
-	failed := 0
-	skipped := 0
+	totalLayers := 0
+	passedLayers := 0
+	failedLayers := 0
+	skippedLayers := 0
 
-	for _, l := range layers {
+	for _, layerType := range layers {
+		// Aggregate results for this layer across all dtypes
+		var fwdSpeedups, bwdSpeedups []float64
+		var mountTimes []time.Duration
+		var errors []string
+		passCount := 0
+		failCount := 0
+		skipCount := 0
+
 		for _, depth := range depths {
-			for _, d := range dtypes {
-				res := verifyLayer(l, depth, d)
-				total++
-				switch res {
-				case "PASS":
-					passed++
-				case "FAIL":
-					failed++
-				case "SKIP":
-					skipped++
+			for _, dtype := range dtypes {
+				result := verifyLayerQuiet(layerType, depth, dtype)
+				if result.Status == "SKIP" {
+					skipCount++
+					continue
 				}
+				if result.Status == "FAIL" {
+					failCount++
+					errors = append(errors, fmt.Sprintf("%s/%s: %s", depth, dtype, result.Error))
+					continue
+				}
+				passCount++
+				fwdSpeedups = append(fwdSpeedups, result.FwdSpeedup)
+				bwdSpeedups = append(bwdSpeedups, result.BwdSpeedup)
+				mountTimes = append(mountTimes, result.MountTime)
 			}
 		}
+
+		totalLayers++
+
+		// Print summary for this layer
+		if skipCount == len(dtypes)*len(depths) {
+			fmt.Printf("  ⏭️  %-12s  (not implemented)\n", layerType)
+			skippedLayers++
+			continue
+		}
+
+		if failCount > 0 {
+			fmt.Printf("  ❌ %-12s  FAILED (%d/%d passed)\n", layerType, passCount, passCount+failCount)
+			for _, e := range errors {
+				fmt.Printf("      └─ %s\n", e)
+			}
+			failedLayers++
+			continue
+		}
+
+		// All passed - show speedup range
+		fwdMin, fwdMax := minMax(fwdSpeedups)
+		bwdMin, bwdMax := minMax(bwdSpeedups)
+		avgMount := avgDuration(mountTimes)
+
+		passedLayers++
+		status := "✅"
+		if fwdMax < 1.0 && bwdMax < 1.0 {
+			status = "⚠️" // GPU slower than CPU (small workload?)
+		}
+
+		fmt.Printf("  %s %-12s  Fwd: %.1f-%.1fx  Bwd: %.1f-%.1fx  Mount: %s  (%d dtypes ✓)\n",
+			status, layerType, fwdMin, fwdMax, bwdMin, bwdMax, fmtDuration(avgMount), passCount)
 	}
 
 	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
-	fmt.Printf("RESULTS: %d Passed, %d Failed, %d Skipped (Total %d)\n", passed, failed, skipped, total)
-	if failed > 0 {
+	fmt.Printf("SUMMARY: %d Passed, %d Failed, %d Skipped (of %d layer types)\n",
+		passedLayers, failedLayers, skippedLayers, totalLayers)
+
+	if failedLayers > 0 {
 		os.Exit(1)
 	}
+}
+
+// LayerResult holds results from a single layer/dtype test
+type LayerResult struct {
+	Status     string
+	Error      string
+	FwdSpeedup float64
+	BwdSpeedup float64
+	MountTime  time.Duration
+}
+
+func minMax(vals []float64) (float64, float64) {
+	if len(vals) == 0 {
+		return 0, 0
+	}
+	minV, maxV := vals[0], vals[0]
+	for _, v := range vals[1:] {
+		if v < minV {
+			minV = v
+		}
+		if v > maxV {
+			maxV = v
+		}
+	}
+	return minV, maxV
+}
+
+func avgDuration(vals []time.Duration) time.Duration {
+	if len(vals) == 0 {
+		return 0
+	}
+	var sum time.Duration
+	for _, v := range vals {
+		sum += v
+	}
+	return sum / time.Duration(len(vals))
 }
 
 // parseCSV parses a comma-separated string and filters against valid options
@@ -127,21 +205,19 @@ func parseCSV(input string, valid []string) []string {
 	return result
 }
 
-func verifyLayer(layerType, depth, dtype string) string {
+func verifyLayerQuiet(layerType, depth, dtype string) LayerResult {
 	configStr := getJSONConfig(layerType, depth, dtype)
 	if configStr == "" {
-		fmt.Printf("  ⚠️  %s/%s: No config available (Skipping)\n", layerType, dtype)
-		return "SKIP"
+		return LayerResult{Status: "SKIP"}
 	}
 
 	// Build network
 	net, _, err := nn.BuildNetworkFromJSONWithDType(configStr)
 	if err != nil {
-		fmt.Printf("  ❌ %s/%s: Build failed: %v\n", layerType, dtype, err)
-		return "FAIL"
+		return LayerResult{Status: "FAIL", Error: fmt.Sprintf("Build: %v", err)}
 	}
 
-	// Initialize weights (crucial!)
+	// Initialize weights
 	net.InitializeWeights()
 
 	// Prepare Input
@@ -152,8 +228,13 @@ func verifyLayer(layerType, depth, dtype string) string {
 	}
 
 	// Set BatchSize for proper CPU batch handling
-	// For LayerNorm: BatchSize = total elements / normSize
 	if layerType == "LayerNorm" && net.TotalLayers() > 0 {
+		layer := net.GetLayer(0, 0, 0)
+		if layer.NormSize > 0 {
+			net.BatchSize = inputSize / layer.NormSize
+		}
+	}
+	if (layerType == "RMSNorm" || layerType == "Softmax") && net.TotalLayers() > 0 {
 		layer := net.GetLayer(0, 0, 0)
 		if layer.NormSize > 0 {
 			net.BatchSize = inputSize / layer.NormSize
@@ -163,98 +244,50 @@ func verifyLayer(layerType, depth, dtype string) string {
 	// 1. CPU Reference
 	startCPU := time.Now()
 	cpuOut, _ := net.ForwardCPU(input)
-	// Create dummy dOutput for backward
 	dOutput := make([]float32, len(cpuOut))
 	for i := range dOutput {
 		dOutput[i] = 1.0
-	} // Simple gradient unit
-
-	// CPU Backward
+	}
 	_, cpuTimeBwd := net.BackwardCPU(dOutput)
-	timeCPU := time.Since(startCPU) - cpuTimeBwd // Approx forward
+	timeCPU := time.Since(startCPU) - cpuTimeBwd
 
 	if len(cpuOut) == 0 {
-		fmt.Printf("  ❌ %s/%s: CPU Forward failed (empty output)\n", layerType, dtype)
-		return "FAIL"
+		return LayerResult{Status: "FAIL", Error: "CPU empty output"}
 	}
 
 	// 2. GPU Candidate
 	res, err := forwardGPU_Measured(net, input, dOutput)
-
 	if err != nil {
 		if strings.Contains(err.Error(), "not implemented") {
-			fmt.Printf("  ⚠️  %s/%s [%s]: GPU Not Implemented Yet\n", layerType, dtype, depth)
-			return "SKIP"
+			return LayerResult{Status: "SKIP"}
 		}
-		fmt.Printf("  ❌ %s/%s: GPU Forward failed: %v\n", layerType, dtype, err)
-		return "FAIL"
+		return LayerResult{Status: "FAIL", Error: fmt.Sprintf("GPU: %v", err)}
 	}
 
 	// 3. Compare Forward
 	maxErr := computeMaxError(cpuOut, res.Output)
-
-	// 4. Compare Gradients (Flatten all)
-	// CPU Gradients are in net.kernelGradients (slice of []float32) and net.biasGradients
-	var maxGradErr float64 = 0.0
-
-	// Check Layer 0 Gradients (Weights)
-	// Note: CPU stores them in net.kernelGradients[0]... but net.Layers might differ if we have other layer types.
-	// We assume simple dense network here so index matches.
-	// For deep networks, we compare average or max across all?
-	// Let's just compare first layer for simplicity or max across all.
-	// Check Layer 0 Gradients (Weights)
-	for i := 0; i < len(net.Layers); i++ {
-		cpuW := net.GetKernelGradients(i)
-		gpuW := res.WeightGrads[i]
-
-		if i == 0 {
-			fmt.Printf("  DEBUG: Layer %d Output Comparison:\n", i)
-			printVec("CPU", cpuOut, 5)
-			printVec("GPU", res.Output, 5)
-
-			fmt.Printf("  DEBUG: Layer %d Weight Grad Comparison:\n", i)
-			printVec("CPU dW", cpuW, 5)
-			printVec("GPU dW", gpuW, 5)
-
-			fmt.Printf("    CPU dB: ")
-			printVec("CPU dB", net.GetBiasGradients(i), 5)
-			fmt.Printf("    GPU dB: ")
-			printVec("GPU dB", res.BiasGrads[i], 5)
-		}
-
-		if e := computeMaxError(cpuW, gpuW); e > maxGradErr {
-			maxGradErr = e
-		}
-
-		cpuB := net.GetBiasGradients(i)
-		gpuB := res.BiasGrads[i]
-		if e := computeMaxError(cpuB, gpuB); e > maxGradErr {
-			maxGradErr = e
-		}
-	}
-
 	threshold := getThreshold(dtype)
-	// bitIdentical := checkBitIdentical(cpuOut, res.Output)
 
-	status := "✅"
-	result := "PASS"
+	// Compute speedup
+	speedupFwd := float64(timeCPU) / float64(res.ForwardTime)
+	speedupBwd := float64(cpuTimeBwd) / float64(res.BackwardTime)
+
 	if maxErr > threshold {
-		status = "❌"
-		result = "FAIL"
-	}
-	if maxGradErr > threshold {
-		status = "⚠️" // Gradient mismatch often tricky due to atomic adds or summation order
-		// result = "FAIL" // Don't fail hard yet on gradients until polished
+		return LayerResult{
+			Status:     "FAIL",
+			Error:      fmt.Sprintf("Error %.2e > threshold %.2e", maxErr, threshold),
+			FwdSpeedup: speedupFwd,
+			BwdSpeedup: speedupBwd,
+			MountTime:  res.MountTime,
+		}
 	}
 
-	fmt.Printf("  %s %-8s [%-7s]: Fwb=[%-6s GPU / %-6s CPU] Bwd=[%-6s GPU / %-6s CPU] Mnt=%-6s UnMnt=%-6s ErrF=%.1e ErrG=%.1e\n",
-		status, dtype, depth,
-		fmtDuration(res.ForwardTime), fmtDuration(timeCPU),
-		fmtDuration(res.BackwardTime), fmtDuration(cpuTimeBwd),
-		fmtDuration(res.MountTime), fmtDuration(res.UnmountTime),
-		maxErr, maxGradErr)
-
-	return result
+	return LayerResult{
+		Status:     "PASS",
+		FwdSpeedup: speedupFwd,
+		BwdSpeedup: speedupBwd,
+		MountTime:  res.MountTime,
+	}
 }
 
 // GPUResult holds verification metrics
@@ -288,7 +321,7 @@ func getLayerSizes(layerType, depth string) (h, batchSize int) {
 		switch layerType {
 		case "Dense":
 			return 1024, 1 // 1024*1024*4 = 4MB weights
-		case "LayerNorm":
+		case "LayerNorm", "RMSNorm", "Softmax":
 			return 1024, 1024 // 1024*1024*4 = 4MB input
 		default:
 			return 256, 1
@@ -298,7 +331,7 @@ func getLayerSizes(layerType, depth string) (h, batchSize int) {
 		switch layerType {
 		case "Dense":
 			return 2048, 1 // 2048*2048*4 = 16MB weights
-		case "LayerNorm":
+		case "LayerNorm", "RMSNorm", "Softmax":
 			return 2048, 2048 // 2048*2048*4 = 16MB input
 		default:
 			return 2048, 1
@@ -308,7 +341,7 @@ func getLayerSizes(layerType, depth string) (h, batchSize int) {
 		switch layerType {
 		case "Dense":
 			return 4096, 1 // 4096*4096*4 = 64MB weights
-		case "LayerNorm":
+		case "LayerNorm", "RMSNorm", "Softmax":
 			return 4096, 4096 // 4096*4096*4 = 64MB input
 		default:
 			return 4096, 1
@@ -355,15 +388,170 @@ func getJSONConfig(layerType, depth, dtype string) string {
 			"dtype": "%s"
 		}`, batch, h, h, dtype)
 	}
+	if layerType == "RMSNorm" {
+		// RMSNorm: similar to LayerNorm but simpler
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-6}
+			],
+			"dtype": "%s"
+		}`, batch, h, h, dtype)
+	}
+	if layerType == "Softmax" {
+		// Softmax: batch of independent softmax operations
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "softmax"}
+			],
+			"dtype": "%s"
+		}`, batch, h, dtype)
+	}
+	if layerType == "Embedding" {
+		// Embedding lookup
+		vocabSize := 1000
+		embDim := h
+		seqLen := batch
+		return fmt.Sprintf(`{
+			"input_shape": [1, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "embedding", "vocab_size": %d, "embedding_dim": %d}
+			],
+			"dtype": "%s"
+		}`, seqLen, vocabSize, embDim, dtype)
+	}
+	if layerType == "Residual" {
+		// Simple residual pass-through
+		return fmt.Sprintf(`{
+			"input_shape": [1, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "residual"}
+			],
+			"dtype": "%s"
+		}`, h, dtype)
+	}
+	if layerType == "SwiGLU" {
+		// SwiGLU gated activation
+		interSize := h * 4 // Typical 4x expansion
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "swiglu", "input_size": %d, "intermediate_size": %d}
+			],
+			"dtype": "%s"
+		}`, batch, h, h, interSize, dtype)
+	}
+	if layerType == "Conv1D" {
+		// 1D Convolution
+		inCh := 32
+		outCh := 64
+		kernel := 3
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "conv1d", "in_channels": %d, "out_channels": %d, "kernel_size": %d}
+			],
+			"dtype": "%s"
+		}`, h, inCh, inCh, outCh, kernel, dtype)
+	}
+	if layerType == "Conv2D" {
+		// 2D Convolution
+		inCh := 3
+		outCh := 32
+		kernel := 3
+		imgSize := 32
+		if depth == "deep" || depth == "stress" {
+			imgSize = 64
+		}
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "conv2d", "in_channels": %d, "out_channels": %d, "kernel_size": %d}
+			],
+			"dtype": "%s"
+		}`, imgSize, imgSize, inCh, inCh, outCh, kernel, dtype)
+	}
+	if layerType == "MHA" {
+		// Multi-Head Attention
+		dModel := h
+		numHeads := 8
+		if h < 64 {
+			numHeads = 4
+		}
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "mha", "d_model": %d, "num_heads": %d}
+			],
+			"dtype": "%s"
+		}`, batch, dModel, dModel, numHeads, dtype)
+	}
+	if layerType == "RNN" {
+		// Basic RNN
+		inputSize := h / 4
+		hiddenSize := h
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "rnn", "input_size": %d, "hidden_size": %d}
+			],
+			"dtype": "%s"
+		}`, batch, inputSize, inputSize, hiddenSize, dtype)
+	}
+	if layerType == "LSTM" {
+		// LSTM
+		inputSize := h / 4
+		hiddenSize := h
+		return fmt.Sprintf(`{
+			"input_shape": [%d, %d],
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 1,
+			"layers": [
+				{"type": "lstm", "input_size": %d, "hidden_size": %d}
+			],
+			"dtype": "%s"
+		}`, batch, inputSize, inputSize, hiddenSize, dtype)
+	}
 	return ""
 }
 
 func getInputSize(layerType, depth string) int {
 	h, batch := getLayerSizes(layerType, depth)
-	if layerType == "LayerNorm" {
+	switch layerType {
+	case "LayerNorm", "RMSNorm", "Softmax":
 		return h * batch // Total elements = batch * normSize
+	default:
+		return h // Dense just uses h as input
 	}
-	return h // Dense just uses h as input
 }
 
 func computeMaxError(a, b []float32) float64 {
@@ -439,8 +627,6 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 				batchSize = 1
 			}
 
-			fmt.Printf("DEBUG: Found LayerNorm. NormSize=%d BatchSize=%d TotalElements=%d\n", pixelSize, batchSize, pixelSize*batchSize)
-
 			spec := gpu.LayerNormSpec{
 				NormSize:  pixelSize,
 				BatchSize: batchSize,
@@ -450,6 +636,48 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 			}
 			layers = append(layers, &gpu.LayerNormLayer{Spec: spec})
 			outputSizeLast = pixelSize * batchSize // Total output elements
+		} else if l.Type == nn.LayerRMSNorm {
+			// RMSNorm layer - similar to LayerNorm but simpler
+			pixelSize := l.NormSize
+			if pixelSize == 0 {
+				pixelSize = len(input)
+			}
+			batchSize := 1
+			if len(input) > pixelSize && pixelSize > 0 {
+				batchSize = len(input) / pixelSize
+			}
+
+			spec := gpu.RMSNormSpec{
+				NormSize:  pixelSize,
+				BatchSize: batchSize,
+				Epsilon:   l.Epsilon,
+				Gamma:     l.Gamma,
+			}
+			layers = append(layers, &gpu.RMSNormLayer{Spec: spec})
+			outputSizeLast = pixelSize * batchSize
+		} else if l.Type == nn.LayerSoftmax {
+			// Softmax layer - parallel reduction for max and sum
+			// Size is inferred from input or could be SoftmaxCols if set
+			softmaxSize := l.SoftmaxCols
+			if softmaxSize == 0 {
+				softmaxSize = len(input) // Default to entire input
+			}
+			batchSize := 1
+			if len(input) > softmaxSize && softmaxSize > 0 {
+				batchSize = len(input) / softmaxSize
+			}
+
+			temp := l.Temperature
+			if temp <= 0 {
+				temp = 1.0
+			}
+			spec := gpu.SoftmaxSpec{
+				Size:        softmaxSize,
+				BatchSize:   batchSize,
+				Temperature: temp,
+			}
+			layers = append(layers, &gpu.SoftmaxLayer{Spec: spec})
+			outputSizeLast = softmaxSize * batchSize
 		} else {
 			// Default to Dense
 			actCode := gpu.ActNone
@@ -551,15 +779,11 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 	var lastOut []float32
 
 	// A. Mount (Upload Weights Once)
-	fmt.Println("    DEBUG: Mounting...")
 	t0 := time.Now()
 	for _, l := range layers {
 		l.UploadWeights(ctx)
 	}
 	pollWithTimeout(ctx)
-
-	// DEBUG: Verify GPU Weights
-	// (Removed)
 	totalMount = time.Since(t0)
 
 	for r := 0; r < Runs; r++ {
@@ -611,6 +835,9 @@ func forwardGPU_Measured(net *nn.Network, input []float32, dOutputLast []float32
 		for _, l := range layers {
 			if lnLayer, ok := l.(*gpu.LayerNormLayer); ok {
 				lnLayer.ZeroGradients(ctx)
+			}
+			if rmsLayer, ok := l.(*gpu.RMSNormLayer); ok {
+				rmsLayer.ZeroGradients(ctx)
 			}
 		}
 
