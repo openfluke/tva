@@ -133,9 +133,9 @@ func main() {
 				"layers_per_cell": 5,
 				"layers": [
 					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
-					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
-					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
-					{"type": "conv1d", "conv1d_in_channels": 64, "conv1d_filters": 64, "conv1d_kernel_size": 3, "conv1d_stride": 1, "conv1d_padding": 1},
+					{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
+					{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
+					{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
 					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
 				]
 			}`,
@@ -152,9 +152,9 @@ func main() {
 				"layers_per_cell": 5,
 				"layers": [
 					{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
-					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
-					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
-					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
+					{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
 					{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
 				]
 			}`,
