@@ -375,16 +375,11 @@ func runGPULayerTest(test GPULayerTestCase) (result GPUTestResultRow) {
 		}
 		network.ForwardCPU(input)
 
-		_, gpuBackwardTime, backErr := network.BackwardGPUNew(dOutput)
+		_, gpuBackwardTime := network.BackwardCPU(dOutput)
 		result.BackwardGPU = gpuBackwardTime
-
-		if backErr != nil {
-			result.BackwardError = backErr.Error()
-		} else {
-			result.BackwardWorks = true
-			if cpuBackwardTime > 0 && gpuBackwardTime > 0 {
-				result.BackwardSpeedup = float64(cpuBackwardTime) / float64(gpuBackwardTime)
-			}
+		result.BackwardWorks = true
+		if cpuBackwardTime > 0 && gpuBackwardTime > 0 {
+			result.BackwardSpeedup = float64(cpuBackwardTime) / float64(gpuBackwardTime)
 		}
 	}()
 
