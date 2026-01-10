@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 	"github.com/openfluke/loom/tokenizer"
 )
@@ -126,6 +127,25 @@ func main() {
 	templateType = "raw"
 	fmt.Println("ℹ️  Using raw mode: prompts passed directly to model")
 
+	// Helper to read simple input
+	readInput := func(prompt string, Default string) string {
+		fmt.Print(prompt)
+		txt, _ := reader.ReadString('\n')
+		txt = strings.TrimSpace(txt)
+		if txt == "" {
+			return Default
+		}
+		return txt
+	}
+
+	// GPU Selection
+	useGPU := false
+	gpuChoice := readInput("\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
+	if gpuChoice == "1" {
+		useGPU = true
+		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
+	}
+
 	// Load model
 	network, err = nn.LoadTransformerFromSafetensors(snapshotDir)
 	if err != nil {
@@ -137,6 +157,18 @@ func main() {
 	tensors, err := nn.LoadSafetensors(weightsPath)
 	if err != nil {
 		log.Fatalf("Error loading weights: %v", err)
+	}
+
+	// Mount to GPU if requested
+	if useGPU {
+		fmt.Println("⚡ Mounting weights to GPU...")
+		network.GPU = true
+		if err := network.WeightsToGPU(); err != nil {
+			log.Printf("⚠️ Failed to mount GPU: %v. Falling back to CPU.", err)
+			network.GPU = false
+		} else {
+			fmt.Println("⚡ GPU Mounted successfully!")
+		}
 	}
 
 	// Load embeddings
