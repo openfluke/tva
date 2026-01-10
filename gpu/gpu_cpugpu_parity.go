@@ -8,14 +8,18 @@ package main
 //   3. Producing a summary table of results
 
 import (
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
 	"strings"
 	"time"
 
+	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 )
+
+var gpuFlag = flag.String("gpu", "", "Optional substring to select a specific GPU adapter (e.g. 'nvidia')")
 
 // GPULayerTestCase defines a test case for a specific hidden layer type
 type GPULayerTestCase struct {
@@ -41,6 +45,12 @@ type GPUTestResultRow struct {
 }
 
 func main() {
+	flag.Parse()
+	if *gpuFlag != "" {
+		fmt.Printf("Requesting GPU adapter matching: %q\n", *gpuFlag)
+		gpu.SetAdapterPreference(*gpuFlag)
+	}
+
 	rand.Seed(time.Now().UnixNano())
 
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
