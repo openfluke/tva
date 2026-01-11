@@ -36,4 +36,15 @@ find . -type f -name "*.go" | sort | while read -r filepath; do
     echo -e "\n---\n" >> "$OUTPUT_FILE"
 done
 
+# 3. Add Results
+if [ -f "results.txt" ]; then
+    echo "Processing results.txt..."
+    echo -e "\n# Test Results" >> "$OUTPUT_FILE"
+    echo '```text' >> "$OUTPUT_FILE"
+    cat results.txt >> "$OUTPUT_FILE"
+    echo -e "\n\`\`\`" >> "$OUTPUT_FILE"
+else
+    echo "Warning: results.txt not found."
+fi
+
 echo "Done! Documentation generated at $OUTPUT_FILE"

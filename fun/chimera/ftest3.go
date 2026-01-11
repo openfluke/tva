@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openfluke/loom/nn"
@@ -11,20 +12,6 @@ import (
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // THE CHIMERA FUSION: A TEST OF DYNAMIC EXPERT SWITCHING
-// ═══════════════════════════════════════════════════════════════════════════════
-//
-// CHALLENGE: A multi-modal task where the required operation shifts between
-// contradictory modes. The network must use a "Gated Mixture of Experts"
-// (FilteredParallelLayer) to route data to the correct specialist.
-//
-// Phases:
-//   1. Sin Mode:    y = sin(x)       (Expert A)
-//   2. Square Mode: y = x^2          (Expert B)
-//   3. Fusion Mode: y = sin(x) + x^2 (Both)
-//   4. Chaos Mode:  y = sin(x) * x^2 (Modulation)
-//
-// We monitor the internal "Gate Weights" to prove the network is making
-// real-time decisions about which expert to trust.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const (
@@ -34,52 +21,167 @@ const (
 	AccuracyWindow = 50
 )
 
+// Modes
+type TrainingMode int
+
+const (
+	ModeNormalBP       TrainingMode = iota // Batch BP
+	ModeStepBP                             // Step BP
+	ModeTween                              // Pure Tween
+	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTweenChain                     // Immediate Tween (Chain Rule)
+)
+
+var modeNames = map[TrainingMode]string{
+	ModeNormalBP:       "BP(Batch)",
+	ModeStepBP:         "BP(Step)",
+	ModeTween:          "Tween(Pure)",
+	ModeTweenChain:     "Tween(Batch)",
+	ModeStepTweenChain: "Tween(Step)",
+}
+
+// Shared State
+type ModeStatus struct {
+	Loss      float32
+	GateProbs []float32
+	Completed bool
+}
+
+var (
+	statusMap = make(map[TrainingMode]*ModeStatus)
+	statusMu  sync.Mutex
+)
+
 func main() {
-	fmt.Println("🦁 The Chimera Fusion: Initializing Multi-Modal Expert Test...")
+	modes := []TrainingMode{
+		ModeNormalBP,
+		ModeStepBP,
+		ModeTween,
+		ModeTweenChain,
+		ModeStepTweenChain,
+	}
 
-	// 1. Build Architecture: Gate -> [Expert A, Expert B] -> Output
-	// Expert A: Sine Specialist candidate
-	expertA := nn.InitDenseLayer(InputWindow, 32, nn.ActivationTanh)
-	// Expert B: Square Specialist candidate (ReLU better for x^2)
-	expertB := nn.InitDenseLayer(InputWindow, 32, nn.ActivationScaledReLU)
+	for _, m := range modes {
+		statusMap[m] = &ModeStatus{Loss: 0, GateProbs: []float32{0, 0}}
+	}
 
-	// Filtered Parallel Layer (MoE)
-	// Input to gate is same as input to branches (InputWindow)
+	fmt.Println("🦁 The Chimera Fusion: Initializing Parallel Multi-Modal Expert Test...")
+
+	fmt.Printf("%-8s | %-12s", "Time", "Phase")
+	for _, m := range modes {
+		fmt.Printf(" | %-12s | %-12s", modeNames[m], "Gate[A, B]")
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 150))
+
+	var wg sync.WaitGroup
+	startTime := time.Now()
+
+	for _, mode := range modes {
+		wg.Add(1)
+		go func(m TrainingMode) {
+			defer wg.Done()
+			runMode(m, startTime)
+		}(mode)
+	}
+
+	monitorTicker := time.NewTicker(200 * time.Millisecond)
+	defer monitorTicker.Stop()
+
+	done := make(chan bool)
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	running := true
+	for running {
+		select {
+		case <-done:
+			running = false
+		case <-monitorTicker.C:
+			elapsed := time.Since(startTime)
+			phase := "UNKNOWN"
+			if elapsed < 5*time.Second {
+				phase = "SIN MODE"
+			} else if elapsed < 10*time.Second {
+				phase = "SQUARE MODE"
+			} else if elapsed < 15*time.Second {
+				phase = "FUSION"
+			} else {
+				phase = "CHAOS"
+			}
+
+			statusMu.Lock()
+			fmt.Printf("%-8s | %-12s", elapsed.Round(100*time.Millisecond).String(), phase)
+			for _, m := range modes {
+				s := statusMap[m]
+				gateStr := "[?.??, ?.??]"
+				if len(s.GateProbs) >= 2 {
+					gateStr = fmt.Sprintf("[%.2f, %.2f]", s.GateProbs[0], s.GateProbs[1])
+				}
+				lossVal := fmt.Sprintf("%.4f", s.Loss)
+				if s.Completed {
+					lossVal = "DONE"
+				}
+				fmt.Printf(" | %-12s | %-12s", lossVal, gateStr)
+			}
+			fmt.Println()
+			statusMu.Unlock()
+		}
+	}
+	fmt.Println("\n\n🏁 Chimera Fusion Test Complete.")
+}
+
+func runMode(mode TrainingMode, startTime time.Time) {
+	// 1. Build Architecture
+	// Layer 0 outputs 32, so Experts must take 32
+	expertA := nn.InitDenseLayer(32, 32, nn.ActivationTanh)
+	expertB := nn.InitDenseLayer(32, 32, nn.ActivationScaledReLU)
+
 	moeLayer := nn.InitFilteredParallelLayer(
 		[]nn.LayerConfig{expertA, expertB},
-		InputWindow,
+		32, // Input is 32
 		nn.SoftmaxStandard,
-		0.5, // Temperature (lower = sharper decisions)
+		0.5,
 	)
 
 	net := nn.NewNetwork(InputWindow, 1, 3, 1)
-
-	// Layer 0: Feature extraction
 	net.SetLayer(0, 0, 0, nn.InitDenseLayer(InputWindow, 32, nn.ActivationLeakyReLU))
-	// Layer 1: The Chimera (MoE)
 	net.SetLayer(0, 1, 0, moeLayer)
-	// Layer 2: Output projection
 	net.SetLayer(0, 2, 0, nn.InitDenseLayer(32, 1, nn.ActivationType(-1)))
-
 	net.InitializeWeights()
 
-	// 2. Setup Step Tween Chain State
-	tweenConfig := &nn.TweenConfig{
-		FrontierEnabled:   true,
-		FrontierThreshold: 0.5,
-		IgnoreThreshold:   0.005,
-		DenseRate:         1.0,
-		AttentionRate:     1.0, // Gate is dense but treated special? No, it's just weights.
+	var stepState *nn.StepState
+	if mode == ModeStepBP {
+		stepState = net.InitStepState(10)
 	}
-	ts := nn.NewGenericTweenState[float32](net, tweenConfig)
 
-	// 3. Main Simulation Loop
-	startTime := time.Now()
+	// 2. Setup
+	ts := nn.NewTweenState(net, nil)
+	ts.Config.FrontierEnabled = true
+	ts.Config.FrontierThreshold = 0.5
+	ts.Config.IgnoreThreshold = 0.005
+	ts.Config.DenseRate = 1.0
+
+	if mode == ModeTween {
+		ts.Config.UseChainRule = false
+	} else {
+		ts.Config.UseChainRule = true
+	}
+
 	inputBuffer := make([]float32, InputWindow)
 	rollingErrors := make([]float32, 0, AccuracyWindow)
 
-	fmt.Printf("\n%-10s | %-16s | %-10s | %-20s\n", "Time", "Phase", "Loss (MSE)", "Gate [ExpA, ExpB]")
-	fmt.Println(strings.Repeat("-", 70))
+	// Batched Logic
+	type TrainingSample struct {
+		Input  []float32
+		Target []float32
+	}
+	trainBatch := make([]TrainingSample, 0, 10)
+	lastTrainTime := time.Now()
+	trainInterval := 50 * time.Millisecond
+	learningRate := float32(0.02)
 
 	ticker := time.NewTicker(StepInterval)
 	defer ticker.Stop()
@@ -90,71 +192,134 @@ func main() {
 		stepCount++
 		t := float64(stepCount) * 0.1
 
-		// Determine Phase
-		phase := "UNKNOWN"
-		var target float32
-		val := math.Sin(t) // Base value
+		// Phase
+		var targetVal float32
+		val := math.Sin(t)
 
 		if elapsed < 5*time.Second {
-			phase = "SIN MODE"
-			target = float32(val)
+			targetVal = float32(val)
 		} else if elapsed < 10*time.Second {
-			phase = "SQUARE MODE"
-			target = float32(val * val)
+			targetVal = float32(val * val)
 		} else if elapsed < 15*time.Second {
-			phase = "FUSION (+)"
-			target = float32(val + val*val)
+			targetVal = float32(val + val*val)
 		} else {
-			phase = "CHAOS (*)"
-			target = float32(val * val * val) // sin * square approx
+			targetVal = float32(val * val * val)
 		}
 
-		// Update Input
 		copy(inputBuffer, inputBuffer[1:])
 		inputBuffer[InputWindow-1] = float32(val)
 
-		// 4. Training Step
-		inputT := nn.NewTensorFromSlice(inputBuffer, InputWindow)
+		// Forward
+		var prediction float32
 
-		// -- Manual Introspection of Gate --
-		// We do this BEFORE the step updates weights to see the "decision" for this step
-		// Get the MoE layer config
+		switch mode {
+		case ModeTween, ModeTweenChain, ModeNormalBP:
+			predArgs, _ := net.ForwardCPU(inputBuffer)
+			prediction = predArgs[0]
+
+		case ModeStepTweenChain, ModeStepBP:
+			if mode == ModeStepBP {
+				stepState.SetInput(inputBuffer)
+				net.StepForward(stepState)
+				out := stepState.GetOutput()
+				if len(out) > 0 {
+					prediction = out[0]
+				}
+			} else {
+				predArgs, _ := net.ForwardCPU(inputBuffer)
+				prediction = predArgs[0]
+			}
+		}
+
+		loss := (targetVal - prediction) * (targetVal - prediction)
+
+		// Training
+		switch mode {
+		case ModeNormalBP:
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{targetVal}})
+			if time.Since(lastTrainTime) > trainInterval && len(trainBatch) > 0 {
+				batches := make([]nn.TrainingBatch, len(trainBatch))
+				for i, s := range trainBatch {
+					batches[i] = nn.TrainingBatch{Input: s.Input, Target: s.Target}
+				}
+				net.Train(batches, &nn.TrainingConfig{Epochs: 1, LearningRate: learningRate, LossType: "mse"})
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+		case ModeStepBP:
+			grad := []float32{prediction - targetVal}
+			net.StepBackward(stepState, grad)
+			net.ApplyGradients(learningRate)
+
+		case ModeStepTweenChain:
+			// Uses Chain Rule by default for StepTweenChain
+			// But for ModeTween (pure), we set useChainRule=false
+			// Here we assume StepTweenChain means Chain Rule
+			if ts.Config.UseChainRule {
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeightsChainRule(net, 0.05)
+			} else {
+				// Safety fallback if config was somehow false (e.g. ModeTween logic sharing)
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeights(net, 0.05)
+			}
+
+		case ModeTweenChain, ModeTween:
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{targetVal}})
+			if time.Since(lastTrainTime) > 50*time.Millisecond && len(trainBatch) > 0 {
+				for _, s := range trainBatch {
+					net.ForwardCPU(s.Input)                  // Prime
+					ts.BackwardPassRegression(net, s.Target) // Gradients
+
+					if ts.Config.UseChainRule {
+						ts.TweenWeightsChainRule(net, 0.05)
+					} else {
+						ts.TweenWeights(net, 0.05)
+					}
+				}
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+		}
+
+		// Introspect Gate
+		// For StepBP, we need to inspect the StepState internals or LayerConfig if using StepForward.
+		// StepForward updates StepState.Activations.
+		// But MoE Gate probs might not be exposed easily in StepState unless we drill down.
+		// With Tween/NormalBP we use ts.ForwardActs or recreate forward.
+		// Recreating forward for inspection is safest.
+
 		moeCfg := net.GetLayer(0, 1, 0)
-		// We need the input to the MoE layer.
-		// Since we are running StepTween, the input to Layer 1 is the output of Layer 0.
-		// However, StepTween forward pass hasn't happened yet for this step.
-		// We can look at the *previous* step's output of Layer 0 using ts.ForwardActs?
-		// Or just wait until after ForwardPass. Let's do after ForwardPass.
-
-		predT := ts.ForwardPass(net, inputT, nil)
-		prediction := predT.Data[0]
-
-		loss := (target - prediction) * (target - prediction)
-		ts.BackwardPassRegression(net, []float32{target})
-		ts.TweenWeightsChainRule(net, 0.05)
-
-		// 5. Introspect Gate Weights (After forward pass)
-		// Input to MoE (Layer 1) was stored in ts.ForwardActs[1] (Input to Layer 1 is Output of Layer 0? No, ForwardActs indices align with layers)
-		// ts.ForwardActs[0] = Network Input
-		// ts.ForwardActs[1] = Layer 0 Output / Layer 1 Input
-		// ts.ForwardActs[2] = Layer 1 Output / Layer 2 Input
-		inputToMoE := ts.ForwardActs[1]
-
 		var gateProbs []float32
-		if moeCfg.FilterGateConfig != nil && inputToMoE != nil {
-			// Manually run the gate layer to see what it did
-			// Recreate tensors for gate weights/bias (pointers share memory with config)
+
+		// Input to MoE is at Layer 1.
+		// For visualization of Gate Probs, we need the input to the MoE layer (L1).
+		// Since we might be using ForwardCPU or StepForward, we can't reliably depend on intermediate state
+		// being exposed in a generic way. We will effectively "peek" by running a partial forward pass
+		// of Layer 0 just for this visualization.
+		var inputToMoE *nn.Tensor[float32]
+
+		l0 := net.GetLayer(0, 0, 0)
+		if l0 != nil {
+			gw := nn.NewTensorFromSlice(l0.Kernel, len(l0.Kernel))
+			gb := nn.NewTensorFromSlice(l0.Bias, len(l0.Bias))
+			inT := nn.NewTensorFromSlice(inputBuffer, InputWindow)
+			_, l0Out := nn.DenseForward(inT, gw, gb, l0.InputHeight, l0.OutputHeight, 1, l0.Activation)
+			inputToMoE = l0Out
+		}
+
+		if moeCfg.FilterGateConfig != nil && inputToMoE != nil && len(inputToMoE.Data) > 0 {
 			gw := nn.NewTensorFromSlice(moeCfg.FilterGateConfig.Kernel, len(moeCfg.FilterGateConfig.Kernel))
 			gb := nn.NewTensorFromSlice(moeCfg.FilterGateConfig.Bias, len(moeCfg.FilterGateConfig.Bias))
-
-			// Dense Forward
 			_, gateOut := nn.DenseForward(inputToMoE, gw, gb,
 				moeCfg.FilterGateConfig.InputHeight,
 				moeCfg.FilterGateConfig.OutputHeight,
 				1,
 				moeCfg.FilterGateConfig.Activation)
-
-			// Softmax
 			probs, _ := nn.ForwardSoftmaxCPU(gateOut.Data, &nn.LayerConfig{
 				SoftmaxVariant: moeCfg.FilterSoftmax,
 				Temperature:    moeCfg.FilterTemperature,
@@ -162,7 +327,7 @@ func main() {
 			gateProbs = probs
 		}
 
-		// 6. Report
+		// Metrics
 		rollingErrors = append(rollingErrors, loss)
 		if len(rollingErrors) > AccuracyWindow {
 			rollingErrors = rollingErrors[1:]
@@ -173,19 +338,12 @@ func main() {
 		}
 		avgLoss /= float32(len(rollingErrors))
 
-		if stepCount%50 == 0 {
-			gateStr := "[?.??, ?.??]"
-			if len(gateProbs) >= 2 {
-				gateStr = fmt.Sprintf("[%.2f, %.2f]", gateProbs[0], gateProbs[1])
-			}
-
-			fmt.Printf("%-10s | %-16s | %-10.4f | %s\n",
-				elapsed.Round(100*time.Millisecond).String(),
-				phase,
-				avgLoss,
-				gateStr)
-		}
+		statusMu.Lock()
+		statusMap[mode].Loss = avgLoss
+		statusMap[mode].GateProbs = gateProbs
+		statusMu.Unlock()
 	}
-
-	fmt.Println("\n🏁 Chimera Fusion Test Complete.")
+	statusMu.Lock()
+	statusMap[mode].Completed = true
+	statusMu.Unlock()
 }

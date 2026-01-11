@@ -5,6 +5,7 @@ import (
 	"math"
 	"math/rand"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openfluke/loom/nn"
@@ -13,28 +14,13 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════
 // HARMONIC CHAMELEON: THE "IMPOSSIBLE" ADAPTATION BENCHMARK
 // ═══════════════════════════════════════════════════════════════════════════════
-//
-// CHALLENGE: Predict a noisy time-series signal where the underlying rule
-// shifts abruptly every 5 seconds. The network is NEVER notified of the shift.
-//
-// Rules:
-//   1. Power Shift: $y = x^2$
-//   2. Rectification: $y = |x|$
-//   3. Frequency Fold: $y = \sin(5x)$
-//   4. Binarization: $y = \text{sign}(x)$
-//
-// Logic:
-//   If the Step Tween Chain can recover accuracy within 1s of an unannounced
-//   rule shift, it demonstrates "Neural Fluid Dynamics" - the ability to
-//   re-equilibrate logic in real-time.
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const (
 	InputWindow    = 16
 	RuleDuration   = 5 * time.Second
-	TotalSteps     = 3000 // Total iterations
+	TotalSteps     = 3000 // 30 seconds
 	StepInterval   = 10 * time.Millisecond
-	AccuracyWindow = 50 // Rolling window for accuracy calculation
+	AccuracyWindow = 50
 )
 
 type RuleType int
@@ -47,131 +33,310 @@ const (
 )
 
 var ruleNames = map[RuleType]string{
-	RulePower:    "Power Shift (x^2)",
-	RuleRectify:  "Rectification (|x|)",
-	RuleSineFold: "Frequency Fold (sin 5x)",
-	RuleBinarize: "Binarization (sign x)",
+	RulePower:    "Power",
+	RuleRectify:  "Rectify",
+	RuleSineFold: "Fold",
+	RuleBinarize: "Binary",
 }
 
+// Modes
+// Modes
+type TrainingMode int
+
+const (
+	ModeNormalBP       TrainingMode = iota // Batch BP
+	ModeStepBP                             // Step BP
+	ModeTween                              // Pure Tween (No Chain Rule)
+	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTweenChain                     // Immediate Tween (Chain Rule)
+)
+
+var modeNames = map[TrainingMode]string{
+	ModeNormalBP:       "BP(Batch)",
+	ModeStepBP:         "BP(Step)",
+	ModeTween:          "Tween(Pure)",
+	ModeTweenChain:     "Tween(Batch)",
+	ModeStepTweenChain: "Tween(Step)",
+}
+
+// Shared State for Table
+type ModeStatus struct {
+	Loss       float32
+	Adaptation string // "OK", "FAIL"
+	Completed  bool
+}
+
+var (
+	statusMap = make(map[TrainingMode]*ModeStatus)
+	statusMu  sync.Mutex
+)
+
 func main() {
-	fmt.Println("🦎 Harmonic Chameleon: Initializing Impossible Task...")
+	modes := []TrainingMode{
+		ModeNormalBP,
+		ModeStepBP,
+		ModeTween,
+		ModeTweenChain,
+		ModeStepTweenChain,
+	}
 
-	// 1. Build a high-capacity architecture for rule-switching
-	// We create a deep 3-layer grid.
+	for _, m := range modes {
+		statusMap[m] = &ModeStatus{Adaptation: "INIT"}
+	}
+
+	fmt.Println("🦎 Harmonic Chameleon: Initializing Parallel Mode Test...")
+
+	// Table Header
+	fmt.Printf("%-8s | %-10s", "Time", "Rule")
+	for _, m := range modes {
+		// Variable width depending on name length? Fixed is better.
+		fmt.Printf(" | %-12s", modeNames[m])
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 100))
+
+	var wg sync.WaitGroup
+	startTime := time.Now()
+
+	for _, mode := range modes {
+		wg.Add(1)
+		go func(m TrainingMode) {
+			defer wg.Done()
+			runMode(m, startTime)
+		}(mode)
+	}
+
+	// Reporter Loop
+	monitorTicker := time.NewTicker(200 * time.Millisecond)
+	defer monitorTicker.Stop()
+
+	done := make(chan bool)
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	running := true
+	for running {
+		select {
+		case <-done:
+			running = false
+		case <-monitorTicker.C:
+			elapsed := time.Since(startTime)
+			ruleCycle := int(elapsed/RuleDuration) % 4
+			activeRuleName := ruleNames[RuleType(ruleCycle)]
+
+			statusMu.Lock()
+			fmt.Printf("%-8s | %-10s", elapsed.Round(100*time.Millisecond).String(), activeRuleName)
+			for _, m := range modes {
+				s := statusMap[m]
+				val := fmt.Sprintf("%.4f", s.Loss)
+				if s.Completed {
+					val = "DONE"
+				}
+				fmt.Printf(" | %-12s", val)
+			}
+			fmt.Println()
+			statusMu.Unlock()
+		}
+	}
+	fmt.Println("\n\n🏁 Benchmark Complete.")
+}
+
+func runMode(mode TrainingMode, startTime time.Time) {
+	// 1. Build Network
 	net := nn.NewNetwork(InputWindow, 1, 3, 1)
-
-	// Customize layers for specific task
-	// Layer 0: Large Dense
 	net.SetLayer(0, 0, 0, nn.InitDenseLayer(InputWindow, 32, nn.ActivationScaledReLU))
-	// Layer 1: Parallel/Ensemble-like (Simulated with Dense for now, or just a large hidden)
 	net.SetLayer(0, 1, 0, nn.InitDenseLayer(32, 32, nn.ActivationLeakyReLU))
-	// Layer 2: Output
 	net.SetLayer(0, 2, 0, nn.InitDenseLayer(32, 1, nn.ActivationTanh))
+
+	// Ensure standard optimizer config for BP modes
+	// net.Optimizer is usually Adam by default in NewNetwork? Or nil?
+	// NewNetwork sets default optimizer.
 
 	net.InitializeWeights()
 
-	// 2. Setup Step Tween Chain State
-	tweenConfig := &nn.TweenConfig{
-		FrontierEnabled:   true,
-		FrontierThreshold: 0.55,
-		IgnoreThreshold:   0.01,
-		DenseRate:         1.0,
+	// stepState for StepBP
+	var stepState *nn.StepState
+	if mode == ModeStepBP {
+		stepState = net.InitStepState(10)
 	}
-	ts := nn.NewGenericTweenState[float32](net, tweenConfig)
 
-	// 2. Main Simulation Loop
-	startTime := time.Now()
+	// 2. Setup Tween
+	ts := nn.NewTweenState(net, nil)
+	ts.Config.FrontierEnabled = true
+	ts.Config.FrontierThreshold = 0.55
+	ts.Config.IgnoreThreshold = 0.01
+	ts.Config.DenseRate = 1.0
+
+	if mode == ModeTween {
+		ts.Config.UseChainRule = false // Pure Tween
+	} else {
+		ts.Config.UseChainRule = true
+	}
+
 	inputBuffer := make([]float32, InputWindow)
-
-	// Rolling accuracy tracker
 	rollingErrors := make([]float32, 0, AccuracyWindow)
 
-	fmt.Printf("\n%-12s | %-25s | %-10s | %-10s\n", "Time", "Active Rule", "Loss (MSE)", "Adaptation")
-	fmt.Println(strings.Repeat("-", 70))
+	// Batched Logic
+	type TrainingSample struct {
+		Input  []float32
+		Target []float32
+	}
+	// For TweenBatch we need slightly different struct or convert
+	trainBatch := make([]TrainingSample, 0, 10)
+
+	lastTrainTime := time.Now()
+	trainInterval := 50 * time.Millisecond
+
+	// Standard SGD Learning Rate
+	learningRate := float32(0.02)
+	// For Tween we use the Config rate? or override?
+	// In test17: Tween uses rate param in function call.
+
+	ticker := time.NewTicker(StepInterval)
+	defer ticker.Stop()
 
 	for step := 0; step < TotalSteps; step++ {
+		<-ticker.C
+
 		elapsed := time.Since(startTime)
 
-		// Determine which rule is active
+		// Rule
 		ruleCycle := int(elapsed/RuleDuration) % 4
 		activeRule := RuleType(ruleCycle)
 
-		// Generate raw oscillating signal
+		// Signal
 		t := float64(step) * 0.1
-		rawSignal := float32(math.Sin(t)) + (rand.Float32() * 0.02) // Add tiny noise
+		rawSignal := float32(math.Sin(t)) + (rand.Float32() * 0.02)
 
-		// Shift window
 		copy(inputBuffer, inputBuffer[1:])
 		inputBuffer[InputWindow-1] = rawSignal
 
-		// Calculate target based on active rule
+		// Target
 		x := rawSignal
-		var target float32
+		var targetVal float32
 		switch activeRule {
 		case RulePower:
-			target = x * x
+			targetVal = x * x
 		case RuleRectify:
-			target = float32(math.Abs(float64(x)))
+			targetVal = float32(math.Abs(float64(x)))
 		case RuleSineFold:
-			target = float32(math.Sin(float64(x) * 5.0))
+			targetVal = float32(math.Sin(float64(x) * 5.0))
 		case RuleBinarize:
 			if x >= 0 {
-				target = 1.0
+				targetVal = 1.0
 			} else {
-				target = -1.0
+				targetVal = -1.0
 			}
 		}
 
-		// 3. Step Tween Chain: Live Adaptation
-		inputT := nn.NewTensorFromSlice(inputBuffer, InputWindow)
+		// Forward
+		var prediction float32
 
-		// ONE cycle of Forward -> Backward -> Weight Update
-		predT := ts.ForwardPass(net, inputT, nil)
-		prediction := predT.Data[0]
+		switch mode {
+		case ModeTween, ModeTweenChain, ModeNormalBP:
+			// CPU Forward (Stateless/Batch Style)
+			predArgs, _ := net.ForwardCPU(inputBuffer)
+			prediction = predArgs[0]
 
-		// Calculate loss
-		diff := target - prediction
-		loss := diff * diff
+		case ModeStepTweenChain, ModeStepBP:
+			if mode == ModeStepBP {
+				stepState.SetInput(inputBuffer)
+				net.StepForward(stepState)
+				out := stepState.GetOutput()
+				if len(out) > 0 {
+					prediction = out[0]
+				}
+			} else {
+				// StepTweenChain uses generic forward pass logic internally or wrapper?
+				// For now use stateless forward unless we want strict step state.
+				// test17 uses ForwardCPU for StepTweenChain.
+				predArgs, _ := net.ForwardCPU(inputBuffer)
+				prediction = predArgs[0]
+			}
+		}
 
-		// Step Tween Chain Logic
-		ts.BackwardPassRegression(net, []float32{target})
-		ts.TweenWeightsChainRule(net, 0.05) // Fast adaptation rate
+		loss := (targetVal - prediction) * (targetVal - prediction)
 
-		// 4. Reporting
+		// Training
+		switch mode {
+		case ModeNormalBP:
+			// Accumulate Batch
+			targetHist := []float32{targetVal}
+			// Copy input
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: targetHist})
+
+			if time.Since(lastTrainTime) > trainInterval && len(trainBatch) > 0 {
+				// Convert to nn.TrainingBatch
+				batches := make([]nn.TrainingBatch, len(trainBatch))
+				for i, s := range trainBatch {
+					batches[i] = nn.TrainingBatch{Input: s.Input, Target: s.Target}
+				}
+				net.Train(batches, &nn.TrainingConfig{Epochs: 1, LearningRate: learningRate, LossType: "mse"})
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+
+		case ModeStepBP:
+			// Immediate Backprop
+			// Grad = Pred - Target
+			grad := []float32{prediction - targetVal}
+			net.StepBackward(stepState, grad)
+			net.ApplyGradients(learningRate)
+
+		case ModeStepTweenChain:
+			if ts.Config.UseChainRule {
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeightsChainRule(net, 0.05)
+			} else {
+				// Should not happen for StepTweenChain but good for safety
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeights(net, 0.05)
+			}
+
+		case ModeTweenChain, ModeTween:
+			// Batch Logic for Tween
+			targetHist := []float32{targetVal}
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: targetHist})
+
+			if time.Since(lastTrainTime) > trainInterval && len(trainBatch) > 0 {
+				for _, s := range trainBatch {
+					net.ForwardCPU(s.Input)                  // Prime
+					ts.BackwardPassRegression(net, s.Target) // Prep gradients/targets
+
+					if ts.Config.UseChainRule {
+						ts.TweenWeightsChainRule(net, 0.05)
+					} else {
+						ts.TweenWeights(net, 0.05)
+					}
+				}
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+		}
+
+		// Metrics
 		rollingErrors = append(rollingErrors, loss)
 		if len(rollingErrors) > AccuracyWindow {
 			rollingErrors = rollingErrors[1:]
 		}
-
 		avgLoss := float32(0)
 		for _, e := range rollingErrors {
 			avgLoss += e
 		}
 		avgLoss /= float32(len(rollingErrors))
 
-		if step%100 == 0 {
-			adaptation := "STABLE"
-			if avgLoss > 0.05 {
-				adaptation = "ADAPTING..."
-			}
-			if avgLoss > 0.5 {
-				adaptation = "SHIFTING!"
-			}
-
-			fmt.Printf("%-12s | %-25s | %-10.4f | %-10s\n",
-				elapsed.Round(100*time.Millisecond).String(),
-				ruleNames[activeRule],
-				avgLoss,
-				adaptation)
-		}
-
-		time.Sleep(StepInterval)
+		statusMu.Lock()
+		statusMap[mode].Loss = avgLoss
+		statusMu.Unlock()
 	}
 
-	fmt.Println("\n🏁 Benchmark Complete.")
-	finalLoss := float32(0)
-	for _, e := range rollingErrors {
-		finalLoss += e
-	}
-	fmt.Printf("Final Average Loss (Rolling): %.4f\n", finalLoss/float32(len(rollingErrors)))
+	statusMu.Lock()
+	statusMap[mode].Completed = true
+	statusMu.Unlock()
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openfluke/loom/nn"
@@ -12,65 +13,169 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════
 // THE PROTEUS SIGNAL: A TEST OF CONTINUOUS ADAPTATION
 // ═══════════════════════════════════════════════════════════════════════════════
-//
-// CHALLENGE: The target signal "morphs" continuously. The network must adapt
-// in real-time without stopping to retraining.
-//
-// Phases:
-//   1. 0-5s:   Sine Wave
-//   2. 5-10s:  Frequency Shift (2x Speed)
-//   3. 10-15s: Square Wave
-//   4. 15-20s: Composite (Sine + Square)
-//
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const (
 	InputWindow         = 32
 	PhaseDuration       = 5 * time.Second
 	StepInterval        = 10 * time.Millisecond
 	TotalPhases         = 4
-	AdaptationThreshold = 0.05 // Loss must drop below this to be considered "LOCKED"
+	AdaptationThreshold = 0.05
+)
+
+// Modes
+type TrainingMode int
+
+const (
+	ModeNormalBP       TrainingMode = iota // Batch BP
+	ModeStepBP                             // Step BP
+	ModeTween                              // Pure Tween
+	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTweenChain                     // Immediate Tween (Chain Rule)
+)
+
+var modeNames = map[TrainingMode]string{
+	ModeNormalBP:       "BP(Batch)",
+	ModeStepBP:         "BP(Step)",
+	ModeTween:          "Tween(Pure)",
+	ModeTweenChain:     "Tween(Batch)",
+	ModeStepTweenChain: "Tween(Step)",
+}
+
+// Shared State
+type ModeStatus struct {
+	Loss      float32
+	Status    string
+	Latency   time.Duration
+	Completed bool
+}
+
+var (
+	statusMap = make(map[TrainingMode]*ModeStatus)
+	statusMu  sync.Mutex
 )
 
 func main() {
-	fmt.Println("🌊 The Proteus Signal: Initializing Continuous Adaptation Test...")
+	modes := []TrainingMode{
+		ModeNormalBP,
+		ModeStepBP,
+		ModeTween,
+		ModeTweenChain,
+		ModeStepTweenChain,
+	}
 
+	for _, m := range modes {
+		statusMap[m] = &ModeStatus{Status: "INIT"}
+	}
+
+	fmt.Println("🌊 The Proteus Signal: Initializing Parallel Continuous Adaptation Test...")
+
+	fmt.Printf("%-8s | %-16s", "Time", "Signal")
+	for _, m := range modes {
+		fmt.Printf(" | %-8s | %-10s", fmt.Sprintf("Loss %s", modeNames[m]), "Status")
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 140))
+
+	var wg sync.WaitGroup
+	startTime := time.Now()
+
+	for _, mode := range modes {
+		wg.Add(1)
+		go func(m TrainingMode) {
+			defer wg.Done()
+			runMode(m, startTime)
+		}(mode)
+	}
+
+	monitorTicker := time.NewTicker(200 * time.Millisecond)
+	defer monitorTicker.Stop()
+
+	done := make(chan bool)
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	phaseNames := []string{"Sine Wave", "High Freq Sine", "Square Wave", "Composite Wave"}
+
+	running := true
+	for running {
+		select {
+		case <-done:
+			running = false
+		case <-monitorTicker.C:
+			elapsed := time.Since(startTime)
+
+			// Approximate phase
+			phaseIdx := int(elapsed / PhaseDuration)
+			if phaseIdx >= len(phaseNames) {
+				phaseIdx = len(phaseNames) - 1
+			}
+			phaseName := phaseNames[phaseIdx]
+
+			statusMu.Lock()
+			fmt.Printf("%-8s | %-16s", elapsed.Round(100*time.Millisecond).String(), phaseName)
+			for _, m := range modes {
+				s := statusMap[m]
+				val := fmt.Sprintf("%.4f", s.Loss)
+				if s.Completed {
+					val = "DONE"
+				}
+				statusStr := s.Status
+				if s.Status == "LOCKED" && s.Latency > 0 {
+					statusStr = fmt.Sprintf("LOCK(%s)", s.Latency.Round(time.Millisecond))
+				}
+				fmt.Printf(" | %-8s | %-10s", val, statusStr)
+			}
+			fmt.Println()
+			statusMu.Unlock()
+		}
+	}
+	fmt.Println("\n\n🏁 Proteus Signal Test Complete.")
+}
+
+func runMode(mode TrainingMode, startTime time.Time) {
 	// 1. Build Architecture
-	// Standard Dense Network (Plasticity comes from the Engine, not special architecture)
-	net := nn.NewNetwork(InputWindow, 1, 1, 1)
-
-	// Layer 0: Input
+	net := nn.NewNetwork(InputWindow, 1, 3, 1)
 	net.SetLayer(0, 0, 0, nn.InitDenseLayer(InputWindow, 64, nn.ActivationTanh))
-	// Layer 1: Hidden (Wide for flexibility)
 	net.SetLayer(0, 1, 0, nn.InitDenseLayer(64, 32, nn.ActivationLeakyReLU))
-	// Layer 2: Output
 	net.SetLayer(0, 2, 0, nn.InitDenseLayer(32, 1, nn.ActivationType(-1)))
-
 	net.InitializeWeights()
 
-	// 2. Setup Step Tween Chain (High Plasticity)
-	tweenConfig := &nn.TweenConfig{
-		FrontierEnabled:   true, // Enable Frontier Plasticity
-		FrontierThreshold: 0.5,  // Aggressive frontier
-		DenseRate:         0.2,  // High learning rate for rapid adaptation
-		Momentum:          0.4,  // Lower momentum to allow quick direction changes
+	var stepState *nn.StepState
+	if mode == ModeStepBP {
+		stepState = net.InitStepState(64)
 	}
-	ts := nn.NewGenericTweenState[float32](net, tweenConfig)
 
-	// 3. Main Loop
+	ts := nn.NewTweenState(net, nil)
+	ts.Config.FrontierEnabled = true
+	ts.Config.FrontierThreshold = 0.5
+	ts.Config.DenseRate = 0.2
+	ts.Config.Momentum = 0.4
+
+	if mode == ModeTween {
+		ts.Config.UseChainRule = false
+	} else {
+		ts.Config.UseChainRule = true
+	}
+
 	inputBuffer := make([]float32, InputWindow)
 
 	// Phase Info
 	phaseNames := []string{"Sine Wave", "High Freq Sine", "Square Wave", "Composite Wave"}
 	currentPhaseIdx := 0
 
-	fmt.Printf("\n%-10s | %-16s | %-10s | %s\n", "Time", "Signal", "Loss", "Status")
-	fmt.Println(strings.Repeat("-", 70))
+	type TrainingSample struct {
+		Input  []float32
+		Target []float32
+	}
+	trainBatch := make([]TrainingSample, 0, 10)
+	lastTrainTime := time.Now()
+	trainInterval := 50 * time.Millisecond
+	learningRate := float32(0.02)
 
-	startTime := time.Now()
 	phaseStart := startTime
-
-	// Stats
+	lastTrainTime = startTime
 	morphTime := startTime
 	hasAdapted := false
 
@@ -81,10 +186,8 @@ func main() {
 
 	for {
 		now := time.Now()
-		elapsed := now.Sub(startTime)
 		phaseElapsed := now.Sub(phaseStart)
 
-		// Check Phase Rotation
 		if phaseElapsed >= PhaseDuration {
 			currentPhaseIdx++
 			if currentPhaseIdx >= len(phaseNames) {
@@ -93,79 +196,130 @@ func main() {
 			phaseStart = now
 			morphTime = now
 			hasAdapted = false
-			fmt.Printf(">>> MORPH EVENT: %s\n", phaseNames[currentPhaseIdx])
 		}
 
 		<-ticker.C
 		stepCount++
 		t := float64(stepCount) * 0.1
 
-		// 1. Generate Signal (Proteus)
-		var target float32
+		// 1. Generate Signal
+		var targetVal float32
 		var val float64
 
 		switch currentPhaseIdx {
-		case 0: // Sine
+		case 0:
 			val = math.Sin(t)
-		case 1: // High Freq
+		case 1:
 			val = math.Sin(t * 2.5)
-		case 2: // Square
+		case 2:
 			s := math.Sin(t)
 			if s > 0 {
 				val = 0.8
 			} else {
 				val = -0.8
 			}
-		case 3: // Composite
+		case 3:
 			val = (math.Sin(t) + (math.Sin(t*3) * 0.5)) / 1.5
 		}
-		target = float32(val)
+		targetVal = float32(val)
 
-		// Context Window Update
 		copy(inputBuffer, inputBuffer[1:])
-		inputBuffer[InputWindow-1] = target
-
-		// 2. Train (Step Tween Chain)
-		inputT := nn.NewTensorFromSlice(inputBuffer, InputWindow)
+		inputBuffer[InputWindow-1] = targetVal
 
 		// Forward
-		predT := ts.ForwardPass(net, inputT, nil)
-		prediction := predT.Data[0]
+		var prediction float32
 
-		// Backward
-		ts.BackwardPassRegression(net, []float32{target})
+		switch mode {
+		case ModeTween, ModeTweenChain, ModeNormalBP:
+			predArgs, _ := net.ForwardCPU(inputBuffer)
+			prediction = predArgs[0]
 
-		// Update Weights (Online Learning)
-		ts.TweenWeightsChainRule(net, 0.2) // High rate for adaptation
+		case ModeStepTweenChain, ModeStepBP:
+			if mode == ModeStepBP {
+				stepState.SetInput(inputBuffer)
+				net.StepForward(stepState)
+				out := stepState.GetOutput()
+				if len(out) > 0 {
+					prediction = out[0]
+				}
+			} else {
+				// StepTween uses ForwardCPU logic
+				predArgs, _ := net.ForwardCPU(inputBuffer)
+				prediction = predArgs[0]
+			}
+		}
 
-		loss := (target - prediction) * (target - prediction)
+		loss := (targetVal - prediction) * (targetVal - prediction)
 
-		// 3. Monitoring
-		status := "ADAPTING..."
+		// Training
+		switch mode {
+		case ModeNormalBP:
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{targetVal}})
+			if time.Since(lastTrainTime) > trainInterval && len(trainBatch) > 0 {
+				batches := make([]nn.TrainingBatch, len(trainBatch))
+				for i, s := range trainBatch {
+					batches[i] = nn.TrainingBatch{Input: s.Input, Target: s.Target}
+				}
+				net.Train(batches, &nn.TrainingConfig{Epochs: 1, LearningRate: learningRate, LossType: "mse"})
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+		case ModeStepBP:
+			grad := []float32{prediction - targetVal}
+			net.StepBackward(stepState, grad)
+			net.ApplyGradients(learningRate)
+
+		case ModeStepTweenChain:
+			if ts.Config.UseChainRule {
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeightsChainRule(net, 0.2)
+			} else {
+				ts.BackwardPassRegression(net, []float32{targetVal})
+				ts.TweenWeights(net, 0.2)
+			}
+
+		case ModeTweenChain, ModeTween:
+			inHist := make([]float32, InputWindow)
+			copy(inHist, inputBuffer)
+			trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{targetVal}})
+			if time.Since(lastTrainTime) > 50*time.Millisecond && len(trainBatch) > 0 {
+				for _, s := range trainBatch {
+					net.ForwardCPU(s.Input)                  // Prime
+					ts.BackwardPassRegression(net, s.Target) // Gradients
+
+					if ts.Config.UseChainRule {
+						ts.TweenWeightsChainRule(net, 0.2)
+					} else {
+						ts.TweenWeights(net, 0.2)
+					}
+				}
+				trainBatch = trainBatch[:0]
+				lastTrainTime = time.Now()
+			}
+		}
+
+		status := "ADAPTING"
+		var latency time.Duration
 		if loss < AdaptationThreshold {
 			status = "LOCKED"
 			if !hasAdapted {
 				hasAdapted = true
-				latency := time.Since(morphTime)
-				status = fmt.Sprintf("LOCKED (Latency: %s)", latency.Round(time.Millisecond))
-				// Log the lock-on event clearly
-				fmt.Printf("%-10s | %-16s | %-10.4f | %s\n",
-					elapsed.Round(100*time.Millisecond).String(),
-					phaseNames[currentPhaseIdx],
-					loss,
-					status)
+				latency = time.Since(morphTime)
 			}
 		}
 
-		if stepCount%50 == 0 && !hasAdapted {
-			fmt.Printf("%-10s | %-16s | %-10.4f | %s\n",
-				elapsed.Round(100*time.Millisecond).String(),
-				phaseNames[currentPhaseIdx],
-				loss,
-				status)
+		statusMu.Lock()
+		statusMap[mode].Loss = loss
+		statusMap[mode].Status = status
+		if latency > 0 {
+			statusMap[mode].Latency = latency
 		}
+		statusMu.Unlock()
 	}
 
-	fmt.Println("\n🏁 Proteus Signal Test Complete.")
-	// Ideally we'd print summary stats, but the real-time log is the proof.
+	statusMu.Lock()
+	statusMap[mode].Completed = true
+	statusMu.Unlock()
 }

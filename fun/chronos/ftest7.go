@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/openfluke/loom/nn"
@@ -12,175 +13,292 @@ import (
 // ═══════════════════════════════════════════════════════════════════════════════
 // ⏳ THE CHRONOS PARADOX: A TEST OF IMPLICIT RECURRENCE
 // ═══════════════════════════════════════════════════════════════════════════════
-//
-// CHALLENGE: A Feed-Forward Network usually has NO memory.
-// But Loom's Step Tween Chain uses "Double Buffering" (Pipeline Execution).
-// This implies that a signal takes exactly 1 step to move 1 layer.
-//
-// In a 12-Layer Deep Network, the output should reflect the input from 12 steps ago.
-// If we CUT the sensor input (Occlusion), the "Ghost" of the object should
-// persist inside the network for 12 steps before the output collapses.
-//
-// This proves "Object Permanence" (Subjective Time) without RNNs.
-//
-// ═══════════════════════════════════════════════════════════════════════════════
 
 const (
 	DeepLayers     = 12
 	InputWindow    = 1
-	StepInterval   = 20 * time.Millisecond // Slower tick to let us see it
+	StepInterval   = 20 * time.Millisecond
 	TrainingSteps  = 300
 	OcclusionSteps = 20
 )
 
+// Modes
+type TrainingMode int
+
+const (
+	ModeNormalBP       TrainingMode = iota // Batch BP
+	ModeStepBP                             // Step BP
+	ModeTween                              // Pure Tween
+	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTweenChain                     // Immediate Tween (Chain Rule)
+)
+
+var modeNames = map[TrainingMode]string{
+	ModeNormalBP:       "BP(Batch)",
+	ModeStepBP:         "BP(Step)",
+	ModeTween:          "Tween(Pure)",
+	ModeTweenChain:     "Tween(Batch)",
+	ModeStepTweenChain: "Tween(Step)",
+}
+
+// Shared State
+type ModeStatus struct {
+	Prediction float32
+	Status     string
+	Completed  bool
+}
+
+var (
+	statusMap = make(map[TrainingMode]*ModeStatus)
+	statusMu  sync.Mutex
+)
+
 func main() {
-	fmt.Println("⏳ The Chronos Paradox: Initializing Object Permanence Test...")
+	modes := []TrainingMode{
+		ModeNormalBP,
+		ModeStepBP,
+		ModeTween,
+		ModeTweenChain,
+		ModeStepTweenChain,
+	}
 
+	for _, m := range modes {
+		statusMap[m] = &ModeStatus{Status: "INIT"}
+	}
+
+	fmt.Println("⏳ The Chronos Paradox: Initializing Parallel Object Permanence Test...")
+
+	fmt.Printf("%-8s | %-12s | %-10s", "Step", "State", "Input")
+	for _, m := range modes {
+		fmt.Printf(" | %-12s | %-10s", fmt.Sprintf("Pred %s", modeNames[m]), "Status")
+	}
+	fmt.Println()
+	fmt.Println(strings.Repeat("-", 140))
+
+	var wg sync.WaitGroup
+	startTime := time.Now()
+
+	for _, mode := range modes {
+		wg.Add(1)
+		go func(m TrainingMode) {
+			defer wg.Done()
+			runMode(m, startTime)
+		}(mode)
+	}
+
+	monitorTicker := time.NewTicker(StepInterval)
+	defer monitorTicker.Stop()
+
+	done := make(chan bool)
+	go func() {
+		wg.Wait()
+		done <- true
+	}()
+
+	running := true
+	stepRel := 0
+
+	for running {
+		select {
+		case <-done:
+			running = false
+		case <-monitorTicker.C:
+			// We can't perfectly sync steps for display, so we just sample at interval
+			step := stepRel // Rough approx
+			_ = step
+
+			elapsed := time.Since(startTime)
+			// Approx step
+			approxStep := int(elapsed / StepInterval)
+			stateStr := "TRAINING"
+			inputVal := "SIGNAL"
+
+			if approxStep >= TrainingSteps {
+				stateStr = "OCCLUDED"
+				inputVal = "0.0000"
+			}
+
+			statusMu.Lock()
+			fmt.Printf("%-8d | %-12s | %-10s", approxStep, stateStr, inputVal)
+			for _, m := range modes {
+				s := statusMap[m]
+				val := fmt.Sprintf("%.4f", s.Prediction)
+				if s.Completed {
+					val = "DONE"
+				}
+				fmt.Printf(" | %-12s | %-10s", val, s.Status)
+			}
+			fmt.Println()
+			statusMu.Unlock()
+
+			stepRel++
+			if stepRel > TrainingSteps+OcclusionSteps+10 {
+				// Fallback exit
+			}
+		}
+	}
+	fmt.Println("\n\n🏁 Chronos Paradox Test Complete.")
+}
+
+func runMode(mode TrainingMode, startTime time.Time) {
 	// 1. Build Deep Architecture (12 Layers)
-	// Input -> Dense -> Dense ... -> Output
-	// We use Identity activation (or close to it) to make the signal propagation clear?
-	// Tanh is fine.
-	net := nn.NewNetwork(InputWindow, 1, 1, 1)
-
-	// Layer 0: Input (Size 1)
-	net.SetLayer(0, 0, 0, nn.InitDenseLayer(1, 16, nn.ActivationTanh))
-
-	// Layers 1-11: Deep Hidden Layers (The "Time Tunnel")
-	// Note: Maximum layers per cell is usually limited. We need to check if 12 fits?
-	// Usually Loom supports flexible depth. We'll use a sequential approach if needed.
-	// But `SetLayer` targets indices. `NewNetwork` sets `LayersPerCell`?
-	// Wait, `NewNetwork` takes `layersPerCell` in arg 4?
-	// Checking signature: NewNetwork(inputSize, gridRows, gridCols, layersPerCell)
-	// We need 12 layers + Input + Output? No, Total Layers.
-	// Let's remake the network with enough capacity.
-
-	// Re-initializing network with correct depth
-	net = nn.NewNetwork(1, 1, 1, DeepLayers+2)
-
-	net.SetLayer(0, 0, 0, nn.InitDenseLayer(1, 16, nn.ActivationLeakyReLU)) // Input Layer
-
+	net := nn.NewNetwork(1, 1, 1, DeepLayers+2)
+	net.SetLayer(0, 0, 0, nn.InitDenseLayer(1, 16, nn.ActivationLeakyReLU)) // Input
 	for i := 1; i <= DeepLayers; i++ {
-		// Linear-ish layers to preserve signal fidelity for this demo
 		net.SetLayer(0, 0, i, nn.InitDenseLayer(16, 16, nn.ActivationLeakyReLU))
 	}
-
-	// Output Layer
-	net.SetLayer(0, 0, DeepLayers+1, nn.InitDenseLayer(16, 1, nn.ActivationType(-1))) // Linear Output
-
+	net.SetLayer(0, 0, DeepLayers+1, nn.InitDenseLayer(16, 1, nn.ActivationType(-1))) // Output
 	net.InitializeWeights()
 
-	// 2. Setup STC
-	tweenConfig := &nn.TweenConfig{
-		//UseChainRule:    true,
-		FrontierEnabled: true,
-		DenseRate:       0.5,
-		Momentum:        0.0, // No momentum to ensure delay is purely structural, not weight-based
+	var stepState *nn.StepState
+	if mode == ModeStepBP {
+		stepState = net.InitStepState(10)
 	}
-	ts := nn.NewGenericTweenState[float32](net, tweenConfig)
 
-	// 3. Loop
+	ts := nn.NewTweenState(net, nil)
+	ts.Config.FrontierEnabled = true
+	ts.Config.DenseRate = 0.5
+	ts.Config.Momentum = 0.0
+
+	if mode == ModeTween {
+		ts.Config.UseChainRule = false
+	} else {
+		ts.Config.UseChainRule = true
+	}
+
 	inputBuffer := make([]float32, 1)
 
-	fmt.Printf("\n%-8s | %-10s | %-10s | %-10s | %s\n", "Step", "State", "Input", "Output", "Status")
-	fmt.Println(strings.Repeat("-", 65))
-
-	startTime := time.Now()
-	ticker := time.NewTicker(StepInterval)
-	defer ticker.Stop()
-
-	// Phase 1: Training (Sync Network)
-	// We need to run enough steps to fill the pipeline first!
-	// Step 0 input reaches output at Step 12.
+	type TrainingSample struct {
+		Input  []float32
+		Target []float32
+	}
+	trainBatch := make([]TrainingSample, 0, 10)
+	lastTrainTime := time.Now()
+	trainInterval := 50 * time.Millisecond
+	learningRate := float32(0.5)
 
 	occluded := false
 	occlusionStepStart := 0
 
+	ticker := time.NewTicker(StepInterval)
+	defer ticker.Stop()
+
 	for step := 0; step < TrainingSteps+OcclusionSteps; step++ {
 		<-ticker.C
 		t := float64(step) * 0.2
-
-		// Signal Gen: Simple Sine Wave
 		realSignal := float32(0.5 + 0.4*math.Sin(t))
 
-		// Input Handling
 		var inputVal float32
-		stateStr := "TRAINING"
-
 		if step >= TrainingSteps {
-			// OCCLUSION START
 			occluded = true
 			if occlusionStepStart == 0 {
 				occlusionStepStart = step
-				fmt.Println(">>> ✂️  SENSORS CUT! (Input = 0) ✂️")
 			}
-			inputVal = 0.0 // BLINDNESS
-			stateStr = "OCCLUDED"
+			inputVal = 0.0
 		} else {
 			inputVal = realSignal
 		}
 
-		// Update Input
 		inputBuffer[0] = inputVal
-		inputT := nn.NewTensorFromSlice(inputBuffer, 1)
 
 		// Forward
-		predT := ts.ForwardPass(net, inputT, nil)
-		prediction := predT.Data[0]
+		var prediction float32
 
-		// Target: We train to reproduce the CURRENT signal,
-		// ignoring the implicit delay. The network will learn to predict/pass-through.
+		switch mode {
+		case ModeTween, ModeTweenChain, ModeNormalBP:
+			predArgs, _ := net.ForwardCPU(inputBuffer)
+			prediction = predArgs[0]
+
+		case ModeStepTweenChain, ModeStepBP:
+			if mode == ModeStepBP {
+				stepState.SetInput(inputBuffer)
+				net.StepForward(stepState)
+				out := stepState.GetOutput()
+				if len(out) > 0 {
+					prediction = out[0]
+				}
+			} else {
+				// StepTween uses ForwardCPU logic
+				predArgs, _ := net.ForwardCPU(inputBuffer)
+				prediction = predArgs[0]
+			}
+		}
+
 		target := realSignal
 
-		// Backward
+		// Training (Only if not occluded)
 		if !occluded {
-			ts.BackwardPassRegression(net, []float32{target})
-			ts.TweenWeightsChainRule(net, 0.5) // High rate
+			switch mode {
+			case ModeNormalBP:
+				inHist := make([]float32, InputWindow)
+				copy(inHist, inputBuffer)
+				trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{target}})
+				if time.Since(lastTrainTime) > trainInterval && len(trainBatch) > 0 {
+					batches := make([]nn.TrainingBatch, len(trainBatch))
+					for i, s := range trainBatch {
+						batches[i] = nn.TrainingBatch{Input: s.Input, Target: s.Target}
+					}
+					net.Train(batches, &nn.TrainingConfig{Epochs: 1, LearningRate: learningRate, LossType: "mse"})
+					trainBatch = trainBatch[:0]
+					lastTrainTime = time.Now()
+				}
+			case ModeStepBP:
+				grad := []float32{prediction - target}
+				net.StepBackward(stepState, grad)
+				net.ApplyGradients(learningRate)
+
+			case ModeStepTweenChain:
+				if ts.Config.UseChainRule {
+					ts.BackwardPassRegression(net, []float32{target})
+					ts.TweenWeightsChainRule(net, 0.5)
+				} else {
+					ts.BackwardPassRegression(net, []float32{target})
+					ts.TweenWeights(net, 0.5)
+				}
+
+			case ModeTweenChain, ModeTween:
+				inHist := make([]float32, InputWindow)
+				copy(inHist, inputBuffer)
+				trainBatch = append(trainBatch, TrainingSample{Input: inHist, Target: []float32{target}})
+				if time.Since(lastTrainTime) > 50*time.Millisecond && len(trainBatch) > 0 {
+					for _, s := range trainBatch {
+						net.ForwardCPU(s.Input) // Prime
+						ts.BackwardPassRegression(net, s.Target)
+
+						if ts.Config.UseChainRule {
+							ts.TweenWeightsChainRule(net, 0.5)
+						} else {
+							ts.TweenWeights(net, 0.5)
+						}
+					}
+					trainBatch = trainBatch[:0]
+					lastTrainTime = time.Now()
+				}
+			}
 		}
 
 		// Analysis
-		// We want to see if prediction PERSISTS (Memory) vs COLLAPSES (Amnesia)
-
-		status := "✅ OK"
-
+		status := "OK"
 		if occluded {
-			// Check against 0.0 (Collapse)
 			if math.Abs(float64(prediction)) < 0.01 {
-				status = "❌ COLLAPSED"
+				status = "COLLAPSED"
 			} else {
-				status = "👻 GHOST"
+				status = "GHOST"
 			}
 		} else {
-			// Training Check
 			diff := prediction - realSignal
-			loss := diff * diff
-			if loss > 0.1 {
-				status = "❌ LOST"
+			if diff*diff > 0.1 {
+				status = "LOST"
 			}
 		}
 
-		stepRel := step
-		if occluded {
-			stepRel = step - occlusionStepStart
-		}
-
-		if occluded || step%20 == 0 {
-			fmt.Printf("%-8d | %-10s | %-10.4f | %-10.4f | %s\n",
-				stepRel, stateStr, inputVal, prediction, status)
-		}
-
-		// Termination check
-		// We expect it to collapse around step 12.
-		if occluded && status == "❌ COLLAPSED" {
-			fmt.Printf("\n💥 SIGNAL COLLAPSE at Step +%d (Expected approx ~%d)\n", stepRel, DeepLayers)
-			// Don't break immediately, let's see if it stays collapsed.
-			// Actually we can stop after collapse to keep log short.
-			if stepRel > 2 {
-				break
-			}
-		}
+		statusMu.Lock()
+		statusMap[mode].Prediction = prediction
+		statusMap[mode].Status = status
+		statusMu.Unlock()
 	}
 
-	fmt.Println("\n🏁 Chronos Paradox Test Complete.")
-	elapsed := time.Since(startTime)
-	fmt.Printf("Total Time: %s\n", elapsed)
+	statusMu.Lock()
+	statusMap[mode].Completed = true
+	statusMu.Unlock()
 }
