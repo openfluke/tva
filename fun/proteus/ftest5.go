@@ -30,6 +30,7 @@ const (
 	ModeStepBP                             // Step BP
 	ModeTween                              // Pure Tween
 	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTween                          // Immediate Tween (No Chain Rule)
 	ModeStepTweenChain                     // Immediate Tween (Chain Rule)
 )
 
@@ -38,7 +39,8 @@ var modeNames = map[TrainingMode]string{
 	ModeStepBP:         "BP(Step)",
 	ModeTween:          "Tween(Pure)",
 	ModeTweenChain:     "Tween(Batch)",
-	ModeStepTweenChain: "Tween(Step)",
+	ModeStepTween:      "Tween(Step)",
+	ModeStepTweenChain: "Tween(Step+)",
 }
 
 // Shared State
@@ -60,6 +62,7 @@ func main() {
 		ModeStepBP,
 		ModeTween,
 		ModeTweenChain,
+		ModeStepTween,
 		ModeStepTweenChain,
 	}
 
@@ -153,7 +156,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 	ts.Config.DenseRate = 0.2
 	ts.Config.Momentum = 0.4
 
-	if mode == ModeTween {
+	if mode == ModeTween || mode == ModeStepTween {
 		ts.Config.UseChainRule = false
 	} else {
 		ts.Config.UseChainRule = true
@@ -234,7 +237,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 			predArgs, _ := net.ForwardCPU(inputBuffer)
 			prediction = predArgs[0]
 
-		case ModeStepTweenChain, ModeStepBP:
+		case ModeStepTweenChain, ModeStepTween, ModeStepBP:
 			if mode == ModeStepBP {
 				stepState.SetInput(inputBuffer)
 				net.StepForward(stepState)
@@ -243,7 +246,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 					prediction = out[0]
 				}
 			} else {
-				// StepTween uses ForwardCPU logic
+				// StepTween variants use ForwardCPU logic
 				predArgs, _ := net.ForwardCPU(inputBuffer)
 				prediction = predArgs[0]
 			}
@@ -271,7 +274,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 			net.StepBackward(stepState, grad)
 			net.ApplyGradients(learningRate)
 
-		case ModeStepTweenChain:
+		case ModeStepTweenChain, ModeStepTween:
 			if ts.Config.UseChainRule {
 				ts.BackwardPassRegression(net, []float32{targetVal})
 				ts.TweenWeightsChainRule(net, 0.2)

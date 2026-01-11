@@ -31,6 +31,7 @@ const (
 	ModeStepBP                             // Continuous Step BP
 	ModeTween                              // Pure Tween (No Chain Rule)
 	ModeTweenChain                         // Batched Tween (Chain Rule)
+	ModeStepTween                          // Continuous Tween (No Chain Rule)
 	ModeStepTweenChain                     // Continuous Tween (Chain Rule)
 )
 
@@ -39,7 +40,8 @@ var modeNames = map[TrainingMode]string{
 	ModeStepBP:         "BP(Step)",
 	ModeTween:          "Tween(Pure)",
 	ModeTweenChain:     "Tween(Batch)",
-	ModeStepTweenChain: "Tween(Step)",
+	ModeStepTween:      "Tween(Step)",
+	ModeStepTweenChain: "Tween(Step+)",
 }
 
 // Shared State
@@ -64,6 +66,7 @@ func main() {
 		ModeStepBP,
 		ModeTween,
 		ModeTweenChain,
+		ModeStepTween,
 		ModeStepTweenChain,
 	}
 
@@ -169,7 +172,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 	ts.Config.Momentum = 0.2
 
 	// Configure Chaining logic
-	if mode == ModeTween {
+	if mode == ModeTween || mode == ModeStepTween {
 		ts.Config.UseChainRule = false // Pure Tween
 	} else {
 		ts.Config.UseChainRule = true
@@ -221,7 +224,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 			out, _ := net.ForwardCPU(inputBuffer)
 			prediction = out[0]
 
-		case ModeStepTweenChain, ModeStepBP:
+		case ModeStepTweenChain, ModeStepTween, ModeStepBP:
 			// Stateful Forward
 			if mode == ModeStepBP {
 				stepState.SetInput(inputBuffer)
@@ -231,7 +234,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 					prediction = out[0]
 				}
 			} else {
-				// Step Tween uses Forward pass but we treat it as 1-step batch effectively for prediction?
+				// Step Tween variants use Forward pass but we treat it as 1-step batch effectively for prediction?
 				// Or does it have state? TweenState currently relies on net.ForwardCPU usually.
 				// For consistency with test17, we use ForwardCPU for Tween modes unless explicitly stateful.
 				out, _ := net.ForwardCPU(inputBuffer)
@@ -269,7 +272,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 		}
 
 		action := "LEARN"
-		if (mode == ModeTween || mode == ModeTweenChain || mode == ModeStepTweenChain) && minBudget < IgnoreThreshold {
+		if (mode == ModeTween || mode == ModeTweenChain || mode == ModeStepTween || mode == ModeStepTweenChain) && minBudget < IgnoreThreshold {
 			action = "REJECT"
 			rejectedCount++
 		}
@@ -296,7 +299,7 @@ func runMode(mode TrainingMode, startTime time.Time) {
 				net.StepBackward(stepState, grad)
 				net.ApplyGradients(learningRate)
 
-			case ModeStepTweenChain:
+			case ModeStepTweenChain, ModeStepTween:
 				// Step Tween: Immediate update
 				if ts.Config.UseChainRule {
 					ts.TweenWeightsChainRule(net, 0.05)
