@@ -1,0 +1,6 @@
+torch>=2.0.0
+safetensors>=0.4.0
+onnx>=1.14.0
+onnxruntime>=1.15.0
+tensorflowjs>=4.17.0
+numpy<2

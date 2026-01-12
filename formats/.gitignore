@@ -1,0 +1,17 @@
+# Virtual Environments
+venv/
+env/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated content
+output/
+*.npy
+*.safetensors
+*.onnx
+*.tflite
+*.json
