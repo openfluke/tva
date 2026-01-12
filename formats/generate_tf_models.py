@@ -8,10 +8,15 @@ try:
     import tensorflow as tf
     from tensorflow import keras
     from tensorflow.keras import layers
-    import tensorflowjs as tfjs
+    # tensorflowjs is optional due to install issues on Py3.13
+    try:
+        import tensorflowjs as tfjs
+        HAS_TFJS = True
+    except ImportError:
+        HAS_TFJS = False
 except ImportError:
-    print("TensorFlow or TensorFlow.js not installed. Please install them to run this script.")
-    print("pip install tensorflow tensorflowjs")
+    print("TensorFlow not installed. Please install it to run this script.")
+    print("pip install tensorflow")
     exit(1)
 
 # Create output directories
@@ -143,8 +148,14 @@ def export_model(model, inputs, name):
     print(f"  Saved TFLite to tva/formats/output/tflite/{name}.tflite")
 
     # Export TFJS
-    tfjs.converters.save_keras_model(model, f"tva/formats/output/tfjs/{name}")
-    print(f"  Saved TFJS to tva/formats/output/tfjs/{name}/")
+    if HAS_TFJS:
+        try:
+            tfjs.converters.save_keras_model(model, f"tva/formats/output/tfjs/{name}")
+            print(f"  Saved TFJS to tva/formats/output/tfjs/{name}/")
+        except Exception as e:
+            print(f"  Failed to save TFJS (error): {e}")
+    else:
+        print(f"  Skipped TFJS export (tensorflowjs not installed).")
 
 if __name__ == "__main__":
     tf.random.set_seed(42)

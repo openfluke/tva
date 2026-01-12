@@ -2,41 +2,44 @@
 
 This directory contains scripts to generate sample neural network models in various formats (`safetensors`, `onnx`, `tflite`, `tfjs`) covering all standard Loom layers.
 
-## Setup
+## One-Shot Generation
 
-It is recommended to use a virtual environment:
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-```
-
-## Running the Examples
-
-### 1. PyTorch & Safetensors & ONNX
-Generates models using PyTorch and exports them to `.safetensors` and `.onnx`.
+Because Python ML libraries conflict with each other (PyTorch vs TensorFlow dependencies), we use **isolated environments**. Only one script is needed:
 
 ```bash
-python generate_torch_models.py
+# This creates two separate venvs and runs everything
+./generate_all.sh
 ```
-Outputs:
+
+This will:
+1.  Create `venv_torch` -> Install PyTorch -> Generate `.safetensors` & `.onnx`
+2.  Create `venv_tf` -> Install TensorFlow -> Generate `.tflite` & `.tfjs`
+
+## Outputs
+
+Check `output/` for the results:
 - `output/safetensors/*.safetensors`
 - `output/onnx/*.onnx`
-- `output/data/*_input.npy`, `*_output.npy`
-
-### 2. TensorFlow & TFLite & TFJS
-Generates equivalent models using TensorFlow/Keras and exports them to `.tflite` and TensorFlow.js format.
-
-```bash
-python generate_tf_models.py
-```
-Outputs:
 - `output/tflite/*.tflite`
 - `output/tfjs/*/`
+- `output/data/*_input.npy` (Test inputs)
 
-## Models Included
+## Manual Setup (Optional)
 
-- **SequenceModel**: Demonstrates Embedding, RNN, LSTM, MultiHeadAttention, LayerNorm, SwiGLU, etc.
-- **VisionModel**: Demonstrates Conv2D, Dense, Dropout.
-- **AudioModel**: Demonstrates Conv1D.
+If you want to run them manually:
+
+**PyTorch / ONNX:**
+```bash
+python3 -m venv venv_torch
+source venv_torch/bin/activate
+pip install -r requirements_torch.txt
+python generate_torch_models.py
+```
+
+**TensorFlow / TFLite / TFJS:**
+```bash
+python3 -m venv venv_tf
+source venv_tf/bin/activate
+pip install -r requirements_tf.txt
+python generate_tf_models.py
+```

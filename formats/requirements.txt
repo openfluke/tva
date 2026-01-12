@@ -1,8 +1,0 @@
-torch>=2.1.0
-safetensors>=0.4.0
-onnx>=1.14.0
-onnxruntime>=1.15.0
-# Python 3.13 requires newer TF. Unpinning to let pip find 2.20+
-tensorflow>=2.20.0
-tensorflowjs>=4.20.0
-numpy<2

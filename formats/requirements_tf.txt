@@ -1,0 +1,6 @@
+# TensorFlow 2.20+ supports Python 3.13
+tensorflow>=2.20.0
+# tensorflowjs removed because it pulls in JAX/Flax which fail on Py3.13
+# tensorflowjs>=4.20.0
+# TF often prefers older numpy
+numpy<2.0.0
