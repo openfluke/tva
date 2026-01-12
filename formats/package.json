@@ -1,0 +1,10 @@
+{
+    "name": "loom-tfjs-converter",
+    "version": "1.0.0",
+    "description": "Convert SavedModels to TFJS format using Node.js",
+    "main": "convert.js",
+    "dependencies": {
+        "@tensorflow/tfjs-node": "^4.20.0",
+        "fs-extra": "^11.2.0"
+    }
+}

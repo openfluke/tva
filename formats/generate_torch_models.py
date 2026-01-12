@@ -7,10 +7,14 @@ import os
 import json
 from safetensors.torch import save_file
 
+# Determine absolute paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
 # Create output directories
-os.makedirs("tva/formats/output/safetensors", exist_ok=True)
-os.makedirs("tva/formats/output/onnx", exist_ok=True)
-os.makedirs("tva/formats/output/data", exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "safetensors"), exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "onnx"), exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "data"), exist_ok=True)
 
 class SwiGLU(nn.Module):
     def __init__(self, d_in, d_out):
@@ -105,25 +109,30 @@ def export_model(model, inputs, name):
         output = model(*inputs)
     
     # Save Data
-    np.save(f"tva/formats/output/data/{name}_input.npy", inputs[0].numpy())
-    np.save(f"tva/formats/output/data/{name}_output.npy", output.numpy())
+    path_input = os.path.join(OUTPUT_DIR, f"data/{name}_input.npy")
+    path_output = os.path.join(OUTPUT_DIR, f"data/{name}_output.npy")
+    np.save(path_input, inputs[0].detach().numpy())
+    np.save(path_output, output.detach().numpy())
+    print(f"  Saved input data to {path_input}")
+    print(f"  Saved output data to {path_output}")
 
-    # Save Safetensors
-    state_dict = model.state_dict()
-    save_file(state_dict, f"tva/formats/output/safetensors/{name}.safetensors")
-    print(f"  Saved safetensors to tva/formats/output/safetensors/{name}.safetensors")
+    # Export Safetensors
+    path_safetensors = os.path.join(OUTPUT_DIR, f"safetensors/{name}.safetensors")
+    save_file(model.state_dict(), path_safetensors)
+    print(f"  Saved safetensors to {path_safetensors}")
 
     # Export ONNX
     try:
+        onnx_path = os.path.join(OUTPUT_DIR, f"onnx/{name}.onnx")
         torch.onnx.export(
-            model, 
-            inputs, 
-            f"tva/formats/output/onnx/{name}.onnx",
+            model,
+            inputs, # Use the actual inputs for ONNX export
+            onnx_path,
             input_names=["input"],
             output_names=["output"],
             dynamic_axes={"input": {0: "batch_size"}, "output": {0: "batch_size"}}
         )
-        print(f"  Saved ONNX to tva/formats/output/onnx/{name}.onnx")
+        print(f"  Saved ONNX to {onnx_path}")
     except Exception as e:
         print(f"  ONNX Export failed: {e}")
 

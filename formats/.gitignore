@@ -10,10 +10,17 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Node.js
+node_modules/
+npm-debug.log
+
 # Generated content
 output/
 *.npy
 *.safetensors
 *.onnx
 *.tflite
+# *.json excluding package.json
 *.json
+!package.json
+!package-lock.json

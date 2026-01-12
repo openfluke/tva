@@ -3,4 +3,7 @@ tensorflow>=2.20.0
 # tensorflowjs removed because it pulls in JAX/Flax which fail on Py3.13
 # tensorflowjs>=4.20.0
 # TF often prefers older numpy
-numpy<2.0.0
+# numpy<2.0.0 removed to allow ml-dtypes on Py3.13 (requires numpy 2.1+)
+numpy
+tf2onnx
+safetensors

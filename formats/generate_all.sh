@@ -34,6 +34,15 @@ fi
 echo "Running TensorFlow generator..."
 ./venv_tf/bin/python generate_tf_models.py
 
+echo "Running Simple Model generator..."
+./venv_tf/bin/python generate_simple_models.py
+
+echo "Converting to TFJS (Node.js)..."
+if [ ! -d "node_modules" ]; then
+    npm install
+fi
+node convert_to_tfjs.js
+
 echo ""
 echo "========================================"
 echo "           All Models Generated         "

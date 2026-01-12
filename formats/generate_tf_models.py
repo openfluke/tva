@@ -19,9 +19,14 @@ except ImportError:
     print("pip install tensorflow")
     exit(1)
 
+# Determine absolute paths
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.join(BASE_DIR, "output")
+
 # Create output directories
-os.makedirs("tva/formats/output/tflite", exist_ok=True)
-os.makedirs("tva/formats/output/tfjs", exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "tflite"), exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "saved_model"), exist_ok=True)
+os.makedirs(os.path.join(OUTPUT_DIR, "tfjs"), exist_ok=True)
 os.makedirs("tva/formats/output/data", exist_ok=True)
 
 class SwiGLU(layers.Layer):
@@ -84,7 +89,7 @@ def create_sequence_model(vocab_size, d_model, n_head):
     attn_out = layers.MultiHeadAttention(num_heads=n_head, key_dim=d_model)(x, x)
     
     # LayerNorm
-    x = layers.LayerNorm()(attn_out + x) # Residual
+    x = layers.LayerNormalization()(attn_out + x) # Residual
     
     # RMSNorm
     x = RMSNorm()(x)
@@ -137,21 +142,28 @@ def export_model(model, inputs, name):
 
     # Export TFLite
     converter = tf.lite.TFLiteConverter.from_keras_model(model)
-    # Enable TF ops if needed for some layers, but standard ones should be fine
+    # Enable Select TF ops to support complex layers if needed
     converter.target_spec.supported_ops = [
-        tf.lite.OpsSet.TFLITE_BUILTINS, 
-        tf.lite.OpsSet.SELECT_TF_OPS 
+        tf.lite.OpsSet.TFLITE_BUILTINS,
+        tf.lite.OpsSet.SELECT_TF_OPS
     ]
     tflite_model = converter.convert()
-    with open(f"tva/formats/output/tflite/{name}.tflite", "wb") as f:
+    tflite_path = os.path.join(OUTPUT_DIR, f"tflite/{name}.tflite")
+    with open(tflite_path, "wb") as f:
         f.write(tflite_model)
-    print(f"  Saved TFLite to tva/formats/output/tflite/{name}.tflite")
+    print(f"  Saved TFLite to {tflite_path}")
+
+    # Export SavedModel (for Node.js conversion or other uses)
+    saved_model_path = os.path.join(OUTPUT_DIR, f"saved_model/{name}")
+    model.export(saved_model_path)
+    print(f"  Saved Keras SavedModel to {saved_model_path}")
 
     # Export TFJS
     if HAS_TFJS:
         try:
-            tfjs.converters.save_keras_model(model, f"tva/formats/output/tfjs/{name}")
-            print(f"  Saved TFJS to tva/formats/output/tfjs/{name}/")
+            tfjs_path = os.path.join(OUTPUT_DIR, f"tfjs/{name}")
+            tfjs.converters.save_keras_model(model, tfjs_path)
+            print(f"  Saved TFJS to {tfjs_path}/")
         except Exception as e:
             print(f"  Failed to save TFJS (error): {e}")
     else:
