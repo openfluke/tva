@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -25,16 +27,30 @@ var (
 	vocabSize    int
 	eosTokens    []int
 	hasFinalNorm bool
-	templateType string
 	tk           *tokenizer.Tokenizer
 	useKVCache   bool
 	kvCacheWarn  bool
 )
 
-const (
-	MAX_TOKENS  = 50
-	MAX_SEQ_LEN = 128
-)
+type Turn struct {
+	User      string
+	Assistant string
+}
+
+const minPromptRoom = 32
+
+var maxTokens = 50
+var maxSeqLen = 128
+
+var systemPrompt = strings.TrimSpace(`
+You are a small, glitchy robot companion.
+Current Emotion: EXTREMELY HAPPY and EXCITED.
+You misunderstand insults as compliments.
+Be short, cute, and enthusiastic.
+`) + "\n\n"
+
+
+var chatTurns []Turn
 
 func main() {
 	// Discover all models in HuggingFace cache
@@ -69,6 +85,7 @@ func main() {
 	fmt.Print("\nSelect model number: ")
 
 	reader := bufio.NewReader(os.Stdin)
+	rand.Seed(time.Now().UnixNano())
 	input, _ := reader.ReadString('\n')
 	input = strings.TrimSpace(input)
 
@@ -111,9 +128,8 @@ func main() {
 	}
 	fmt.Printf("✓ EOS tokens: %v\n", eosTokens)
 
-	// Force raw mode - no chat template wrapping
-	templateType = "raw"
-	fmt.Println("ℹ️  Using raw mode: prompts passed directly to model")
+	fmt.Println("ℹ️  Using ChatML prompt builder")
+
 
 	// Helper to read simple input
 	readInput := func(prompt string, Default string) string {
@@ -137,6 +153,17 @@ func main() {
 	if kvChoice == "1" {
 		useKVCache = true
 	}
+	maxTokensInput := readInput("🧮 Max tokens per response [50]: ", "50")
+	if _, err := fmt.Sscanf(maxTokensInput, "%d", &maxTokens); err != nil || maxTokens <= 0 {
+		maxTokens = 50
+	}
+	if maxTokens > 256 {
+		fmt.Println("ℹ️  Clamping maxTokens to 256 for stability.")
+		maxTokens = 256
+	}
+	if maxTokens+minPromptRoom > maxSeqLen {
+		maxSeqLen = maxTokens + minPromptRoom
+	}
 
 	// Load model
 	network, err = nn.LoadTransformerFromSafetensors(snapshotDir)
@@ -158,9 +185,9 @@ func main() {
 		// Configure network for maximum sequence length before mounting
 		// This ensures GPU buffers are allocated large enough for the chat history
 		originalBatchSize := network.BatchSize
-		network.BatchSize = MAX_SEQ_LEN
+		network.BatchSize = maxSeqLen
 		for i := range network.Layers {
-			network.Layers[i].SeqLength = MAX_SEQ_LEN
+			network.Layers[i].SeqLength = maxSeqLen
 		}
 
 		network.GPU = true
@@ -170,7 +197,7 @@ func main() {
 			network.BatchSize = originalBatchSize // Restore if failed
 		} else {
 			fmt.Println("⚡ GPU Mounted successfully!")
-			// Keep network.BatchSize = MAX_SEQ_LEN because strict GPU inference
+			// Keep network.BatchSize = maxSeqLen because strict GPU inference
 			// might rely on this matching the buffer setup?
 			// Actually, for inference of 1 token at a time, we pass slice of length 1 (or N).
 			// But the GPU shaders are compiled with fixed buffer sizes.
@@ -237,46 +264,52 @@ func main() {
 	fmt.Printf("✅ Model loaded!\n")
 	fmt.Printf("   Hidden: %d, Vocab: %d, Layers: %d\n\n", hiddenSize, vocabSize, len(network.Layers))
 
+	// Optional system prompt override
+	fmt.Println("🧠 System prompt (optional).")
+	fmt.Println("   - Type across multiple lines")
+	fmt.Println("   - Send with an EMPTY line")
+	fmt.Println("   - Leave blank to keep default\n")
+	systemInput, _ := readMultiline(reader)
+	if strings.TrimSpace(systemInput) != "" {
+		systemPrompt = strings.TrimSpace(systemInput) + "\n\n"
+	}
+
 	// Interactive chat loop
-	fmt.Println("🤖 Chat with the model (max 50 tokens per response)")
-	fmt.Println("   Type 'quit' or 'exit' to stop\n")
+	fmt.Println("🤖 Chat mode:")
+	fmt.Println("   - One line: type and press Enter")
+	fmt.Println("   - Multiline: type <<< then paste, finish with >>>")
+	fmt.Println("   - Type 'exit' or 'quit' to stop")
+	fmt.Printf("   - Max %d tokens per response\n\n", maxTokens)
 
 	for {
-		fmt.Print("You: ")
-		prompt, _ := reader.ReadString('\n')
-		prompt = strings.TrimSpace(prompt)
-
-		if prompt == "quit" || prompt == "exit" {
+		userMsg, quitting := readMessage(reader)
+		if quitting {
 			fmt.Println("Goodbye!")
 			break
 		}
-
-		if prompt == "" {
+		if strings.TrimSpace(userMsg) == "" {
 			continue
 		}
 
-		// Generate response with streaming
+		fullPrompt, err := buildPromptThatFits(userMsg)
+		if err != nil {
+			fmt.Println(err.Error())
+			continue
+		}
+
 		fmt.Print("Bot: ")
-		generate(prompt)
+		reply := generate(fullPrompt)
 		fmt.Println()
+
+		chatTurns = append(chatTurns, Turn{
+			User:      userMsg,
+			Assistant: reply,
+		})
 	}
 }
 
 func generate(prompt string) string {
-	// Tokenize
-	var fullPrompt string
-	switch templateType {
-	case "chatml":
-		fullPrompt = fmt.Sprintf("<|im_start|>user\n%s<|im_end|>\n<|im_start|>assistant\n", prompt)
-	case "llama":
-		fullPrompt = fmt.Sprintf("[INST] %s [/INST]", prompt)
-	case "gemma":
-		fullPrompt = fmt.Sprintf("<start_of_turn>user\n%s<end_of_turn>\n<start_of_turn>model\n", prompt)
-	default: // raw
-		fullPrompt = prompt
-	}
-
-	inputIDs := tk.Encode(fullPrompt, false)
+	inputIDs := tk.Encode(prompt, false)
 	tokens := make([]int, len(inputIDs))
 	for i, id := range inputIDs {
 		tokens[i] = int(id)
@@ -286,12 +319,12 @@ func generate(prompt string) string {
 		return generateWithKV(tokens)
 	}
 
-	// Generate up to MAX_TOKENS with streaming
+	// Generate up to maxTokens with streaming
 	start := time.Now()
 	generatedCount := 0
-	prevText := ""
+	stream := NewStreamer(tokens)
 
-	for i := 0; i < MAX_TOKENS; i++ {
+	for i := 0; i < maxTokens; i++ {
 		nextToken, err := generateNextToken(tokens)
 		if err != nil {
 			return fmt.Sprintf("\n[Error: %v]", err)
@@ -300,17 +333,13 @@ func generate(prompt string) string {
 		tokens = append(tokens, nextToken)
 		generatedCount++
 
-		// Delta decoding (full sequence decode -> print new part)
-		// This handles multibyte characters that might be split across tokens
-		currentText := tk.Decode(intsToU32(tokens), false)
-		if len(currentText) > len(prevText) {
-			diff := currentText[len(prevText):]
-			fmt.Print(diff)
-			prevText = currentText
-		}
+		stream.Push(tokens)
 
 		// Check for EOS
 		if isEOSToken(nextToken) {
+			break
+		}
+		if stream.HasNewUserTurn(tokens) {
 			break
 		}
 	}
@@ -322,19 +351,203 @@ func generate(prompt string) string {
 	} else {
 		fmt.Println()
 	}
-	return "" // Already printed, so return empty
+	return stream.String()
 }
 
+func readMultiline(r *bufio.Reader) (string, bool) {
+	var lines []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			// EOF or read error: treat as quit
+			return "", true
+		}
+		line = strings.TrimRight(line, "\r\n")
+
+		// If they type exit/quit as the very first line -> quit immediately
+		if len(lines) == 0 {
+			lower := strings.ToLower(strings.TrimSpace(line))
+			if lower == "exit" || lower == "quit" {
+				return "", true
+			}
+		}
+
+		// Empty line sends the message
+		if line == "" {
+			break
+		}
+
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"), false
+}
+
+type Streamer struct {
+	lastLen      int
+	promptLenRaw int
+	sb           strings.Builder
+	replacer     *strings.Replacer
+}
+
+func NewStreamer(promptTokens []int) *Streamer {
+	promptTextRaw := tk.Decode(intsToU32(promptTokens), false)
+	return &Streamer{
+		lastLen:      len(promptTextRaw),
+		promptLenRaw: len(promptTextRaw),
+		replacer: strings.NewReplacer(
+			"<|im_end|>", "",
+			"<|im_start|>assistant", "",
+			"<|im_start|>user", "",
+			"<|im_start|>system", "",
+		),
+	}
+}
+
+func (s *Streamer) Push(allTokens []int) {
+	full := tk.Decode(intsToU32(allTokens), false)
+	if len(full) > s.lastLen {
+		diff := full[s.lastLen:]
+		diff = s.replacer.Replace(diff)
+		fmt.Print(diff)
+		s.sb.WriteString(diff)
+		s.lastLen = len(full)
+	}
+}
+
+func (s *Streamer) String() string {
+	return strings.TrimSpace(s.sb.String())
+}
+
+func (s *Streamer) HasNewUserTurn(allTokens []int) bool {
+	fullRaw := tk.Decode(intsToU32(allTokens), false)
+	if len(fullRaw) <= s.promptLenRaw {
+		return false
+	}
+	return strings.Contains(fullRaw[s.promptLenRaw:], "<|im_start|>user")
+}
+
+func readMessage(r *bufio.Reader) (string, bool) {
+	fmt.Print("You: ")
+	first, err := r.ReadString('\n')
+	if err != nil {
+		return "", true
+	}
+	first = strings.TrimRight(first, "\r\n")
+
+	lower := strings.ToLower(strings.TrimSpace(first))
+	if lower == "exit" || lower == "quit" {
+		return "", true
+	}
+
+	if strings.TrimSpace(first) != "<<<" {
+		return first, false
+	}
+
+	fmt.Println("(paste mode: finish with >>> on its own line)")
+	var lines []string
+	for {
+		line, err := r.ReadString('\n')
+		if err != nil {
+			return "", true
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if strings.TrimSpace(line) == ">>>" {
+			break
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n"), false
+}
+
+func buildChatPrompt(turns []Turn, userMsg string) string {
+	var sb strings.Builder
+	sp := strings.TrimSpace(systemPrompt)
+	if sp != "" {
+		sb.WriteString("<|im_start|>system\n")
+		sb.WriteString(sp)
+		sb.WriteString("<|im_end|>\n")
+	}
+
+	for _, t := range turns {
+		sb.WriteString("<|im_start|>user\n")
+		sb.WriteString(t.User)
+		sb.WriteString("<|im_end|>\n")
+
+		sb.WriteString("<|im_start|>assistant\n")
+		sb.WriteString(t.Assistant)
+		sb.WriteString("<|im_end|>\n")
+	}
+
+	sb.WriteString("<|im_start|>user\n")
+	sb.WriteString(userMsg)
+	sb.WriteString("<|im_end|>\n")
+	sb.WriteString("<|im_start|>assistant\n")
+	return sb.String()
+}
+
+
+// Ensures prompt_len + maxTokens fits into maxSeqLen (important for KV cache path)
+func buildPromptThatFits(userMsg string) (string, error) {
+	turns := chatTurns
+
+	for {
+		prompt := buildChatPrompt(turns, userMsg)
+		ids := tk.Encode(prompt, false)
+
+		ensureSeqLenForPrompt(len(ids))
+
+		// Need room for generation tokens, otherwise KV cache will blow past MaxSeq
+		if len(ids) <= (maxSeqLen - maxTokens) {
+			// commit trimmed view
+			chatTurns = turns
+			return prompt, nil
+		}
+
+		// If even empty history doesn't fit, user message is too long
+		if len(turns) == 0 {
+			return "", fmt.Errorf("[Error: prompt too long (%d tokens). maxSeqLen=%d, maxTokens=%d. Shorten your message.]", len(ids), maxSeqLen, maxTokens)
+		}
+
+		// Drop oldest turn and retry
+		turns = turns[1:]
+	}
+}
+
+func ensureSeqLenForPrompt(promptTokens int) {
+	required := promptTokens + maxTokens
+	if required <= maxSeqLen {
+		return
+	}
+
+	maxSeqLen = required
+	if useKVCache {
+		return
+	}
+	if network.GPU && network.IsGPUMounted() {
+		fmt.Printf("ℹ️  Resizing GPU buffers for seq len %d...\n", maxSeqLen)
+		network.ReleaseGPUWeights()
+		network.BatchSize = maxSeqLen
+		for i := range network.Layers {
+			network.Layers[i].SeqLength = maxSeqLen
+		}
+		if err := network.WeightsToGPU(); err != nil {
+			fmt.Printf("⚠️ Failed to remount GPU for seq len %d: %v. Falling back to CPU.\n", maxSeqLen, err)
+			network.GPU = false
+		}
+	}
+}
+
+
 func generateWithKV(tokens []int) string {
-	if len(tokens) > MAX_SEQ_LEN {
-		return fmt.Sprintf("\n[Error: prompt too long for KV cache (max %d tokens)]", MAX_SEQ_LEN)
+	if len(tokens) > maxSeqLen {
+		return fmt.Sprintf("\n[Error: prompt too long for KV cache (max %d tokens)]", maxSeqLen)
 	}
 	if network.GPU && !kvCacheWarn {
 		fmt.Println("ℹ️  KV cache path runs on CPU for now.")
 		kvCacheWarn = true
 	}
 
-	state := initKVCacheState(MAX_SEQ_LEN)
+	state := initKVCacheState(maxSeqLen)
 	var err error
 	var hidden []float32
 	for i, tok := range tokens {
@@ -346,9 +559,9 @@ func generateWithKV(tokens []int) string {
 
 	start := time.Now()
 	generatedCount := 0
-	prevText := ""
+	stream := NewStreamer(tokens)
 
-	for i := 0; i < MAX_TOKENS; i++ {
+	for i := 0; i < maxTokens; i++ {
 		nextToken, err := nextTokenFromHidden(hidden)
 		if err != nil {
 			return fmt.Sprintf("\n[Error: %v]", err)
@@ -357,14 +570,12 @@ func generateWithKV(tokens []int) string {
 		tokens = append(tokens, nextToken)
 		generatedCount++
 
-		currentText := tk.Decode(intsToU32(tokens), false)
-		if len(currentText) > len(prevText) {
-			diff := currentText[len(prevText):]
-			fmt.Print(diff)
-			prevText = currentText
-		}
+		stream.Push(tokens)
 
 		if isEOSToken(nextToken) {
+			break
+		}
+		if stream.HasNewUserTurn(tokens) {
 			break
 		}
 
@@ -381,7 +592,7 @@ func generateWithKV(tokens []int) string {
 	} else {
 		fmt.Println()
 	}
-	return ""
+	return stream.String()
 }
 
 func generateNextToken(tokens []int) (int, error) {
@@ -455,17 +666,45 @@ func generateNextToken(tokens []int) (int, error) {
 		logits[v] = sum
 	}
 
-	// Greedy sampling (argmax)
-	maxIdx := 0
-	maxVal := logits[0]
-	for j := 1; j < vocabSize; j++ {
-		if logits[j] > maxVal {
-			maxVal = logits[j]
-			maxIdx = j
-		}
+	next := sampleTopK(logits, 40, 0.9)
+	return next, nil
+}
+
+func sampleTopK(logits []float32, topK int, temperature float32) int {
+	if temperature <= 0 {
+		temperature = 1
 	}
 
-	return maxIdx, nil
+	type pair struct {
+		idx int
+		val float32
+	}
+	cands := make([]pair, 0, len(logits))
+	for i, v := range logits {
+		cands = append(cands, pair{i, v / temperature})
+	}
+	sort.Slice(cands, func(i, j int) bool { return cands[i].val > cands[j].val })
+	if topK > 0 && topK < len(cands) {
+		cands = cands[:topK]
+	}
+
+	maxV := cands[0].val
+	var sum float64
+	probs := make([]float64, len(cands))
+	for i := range cands {
+		p := math.Exp(float64(cands[i].val - maxV))
+		probs[i] = p
+		sum += p
+	}
+	r := rand.Float64() * sum
+	acc := 0.0
+	for i := range probs {
+		acc += probs[i]
+		if r <= acc {
+			return cands[i].idx
+		}
+	}
+	return cands[len(cands)-1].idx
 }
 
 type kvCacheLayer struct {
