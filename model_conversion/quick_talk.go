@@ -86,29 +86,9 @@ func main() {
 
 	// Load tokenizer
 	tokenizerPath := filepath.Join(snapshotDir, "tokenizer.json")
+
 	if _, err := os.Stat(tokenizerPath); os.IsNotExist(err) {
-		fmt.Printf("⚠️  tokenizer.json not found in model directory.\n")
-
-		// Fallback paths to check (using SmolLM2 which has a compatible BPE format)
-		fallbackPaths := []string{
-			"models/SmolLM2-135M-Instruct/tokenizer.json",                       // If running from loom root
-			"../models/SmolLM2-135M-Instruct/tokenizer.json",                    // If running from model_conversion
-			"/home/samuel/git/loom/models/SmolLM2-135M-Instruct/tokenizer.json", // Absolute path backup
-		}
-
-		foundFallback := false
-		for _, fp := range fallbackPaths {
-			if _, err := os.Stat(fp); err == nil {
-				tokenizerPath = fp
-				fmt.Printf("⚠️  Using fallback tokenizer from: %s\n", tokenizerPath)
-				foundFallback = true
-				break
-			}
-		}
-
-		if !foundFallback {
-			log.Printf("⚠️  Could not find fallback tokenizer in common locations.")
-		}
+		log.Fatalf("⚠️  tokenizer.json not found in model directory %s. Aborting to prevent silent failures.", snapshotDir)
 	}
 
 	tk, err = tokenizer.LoadFromFile(tokenizerPath)
@@ -297,6 +277,7 @@ func generate(prompt string) string {
 	// Generate up to MAX_TOKENS with streaming
 	start := time.Now()
 	generatedCount := 0
+	prevText := ""
 
 	for i := 0; i < MAX_TOKENS; i++ {
 		nextToken, err := generateNextToken(tokens)
@@ -307,9 +288,14 @@ func generate(prompt string) string {
 		tokens = append(tokens, nextToken)
 		generatedCount++
 
-		// Decode and print this token immediately (streaming)
-		tokenText := tk.Decode([]uint32{uint32(nextToken)}, false)
-		fmt.Print(tokenText)
+		// Delta decoding (full sequence decode -> print new part)
+		// This handles multibyte characters that might be split across tokens
+		currentText := tk.Decode(intsToU32(tokens), false)
+		if len(currentText) > len(prevText) {
+			diff := currentText[len(prevText):]
+			fmt.Print(diff)
+			prevText = currentText
+		}
 
 		// Check for EOS
 		if isEOSToken(nextToken) {
@@ -328,17 +314,34 @@ func generate(prompt string) string {
 }
 
 func generateNextToken(tokens []int) (int, error) {
-	// Embed tokens
-	input := make([]float32, len(tokens)*hiddenSize)
-	for t, tokenID := range tokens {
-		if tokenID >= vocabSize || tokenID < 0 {
-			// Actually check embeddings len in case vocab mismatch
-			if tokenID*hiddenSize >= len(embeddings) {
-				return 0, fmt.Errorf("token ID %d out of bounds for embedding", tokenID)
-			}
+	// Prepare input
+	// Check if the first layer is an Embedding layer
+	hasEmbeddingLayer := false
+	if len(network.Layers) > 0 && network.Layers[0].Type == nn.LayerEmbedding {
+		hasEmbeddingLayer = true
+	}
+
+	var input []float32
+	if hasEmbeddingLayer {
+		// Pass token IDs directly as floats
+		// CPU Forward (EmbeddingLayer) and GPU Forward both expect this format if EmbeddingLayer exists
+		input = make([]float32, len(tokens))
+		for i, t := range tokens {
+			input[i] = float32(t)
 		}
-		for d := 0; d < hiddenSize; d++ {
-			input[t*hiddenSize+d] = embeddings[tokenID*hiddenSize+d]
+	} else {
+		// Manual embedding (legacy or models without EmbeddingLayer)
+		input = make([]float32, len(tokens)*hiddenSize)
+		for t, tokenID := range tokens {
+			if tokenID >= vocabSize || tokenID < 0 {
+				// Actually check embeddings len in case vocab mismatch
+				if tokenID*hiddenSize >= len(embeddings) {
+					return 0, fmt.Errorf("token ID %d out of bounds for embedding", tokenID)
+				}
+			}
+			for d := 0; d < hiddenSize; d++ {
+				input[t*hiddenSize+d] = embeddings[tokenID*hiddenSize+d]
+			}
 		}
 	}
 
@@ -455,4 +458,12 @@ func hasToken(tk *tokenizer.Tokenizer, token string) bool {
 		return true
 	}
 	return false
+}
+
+func intsToU32(xs []int) []uint32 {
+	out := make([]uint32, len(xs))
+	for i, v := range xs {
+		out[i] = uint32(v)
+	}
+	return out
 }
