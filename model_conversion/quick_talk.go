@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
@@ -17,6 +18,7 @@ import (
 var (
 	network      *nn.Network
 	embeddings   []float32
+	lmHead       []float32
 	finalNorm    []float32
 	hiddenSize   int
 	vocabSize    int
@@ -159,15 +161,32 @@ func main() {
 		log.Fatalf("Error loading weights: %v", err)
 	}
 
+	const MAX_SEQ_LEN = 128
+
 	// Mount to GPU if requested
 	if useGPU {
 		fmt.Println("⚡ Mounting weights to GPU...")
+
+		// Configure network for maximum sequence length before mounting
+		// This ensures GPU buffers are allocated large enough for the chat history
+		originalBatchSize := network.BatchSize
+		network.BatchSize = MAX_SEQ_LEN
+		for i := range network.Layers {
+			network.Layers[i].SeqLength = MAX_SEQ_LEN
+		}
+
 		network.GPU = true
 		if err := network.WeightsToGPU(); err != nil {
 			log.Printf("⚠️ Failed to mount GPU: %v. Falling back to CPU.", err)
 			network.GPU = false
+			network.BatchSize = originalBatchSize // Restore if failed
 		} else {
 			fmt.Println("⚡ GPU Mounted successfully!")
+			// Keep network.BatchSize = MAX_SEQ_LEN because strict GPU inference
+			// might rely on this matching the buffer setup?
+			// Actually, for inference of 1 token at a time, we pass slice of length 1 (or N).
+			// But the GPU shaders are compiled with fixed buffer sizes.
+			// So logic is fine.
 		}
 	}
 
@@ -189,10 +208,43 @@ func main() {
 		"ln_f.weight",
 		"norm.weight",
 	})
+
+	// Load LM Head (if available, otherwise use embeddings)
+	// Some models (like Llama 2) share weights, others don't.
+	fmt.Printf("Searching for lm_head weights...\n")
+	lmHead = tryLoadTensor(tensors, []string{"lm_head.weight", "output.weight"})
+	if lmHead == nil {
+		fmt.Println("ℹ️ No separate lm_head found, assuming tied weights (using embeddings).")
+		// Debug: print top 10 keys to see what we have
+		fmt.Println("Available keys (first 10):")
+		count := 0
+		for k := range tensors {
+			if count < 10 {
+				fmt.Println(" -", k)
+				count++
+			}
+		}
+		// Try to find if maybe it's just named differently?
+		// e.g. model.embed_tokens.weight sometimes?
+		lmHead = embeddings
+	} else {
+		fmt.Printf("✅ Loaded separate lm_head weights: %d values\n", len(lmHead))
+	}
+
 	hasFinalNorm = (finalNorm != nil)
 
 	hiddenSize = network.InputSize
 	vocabSize = len(embeddings) / hiddenSize
+
+	// Double check vocab size against lm_head if separate
+	if len(lmHead) != len(embeddings) {
+		// e.g. lm_head might be [Vocab, Hidden]
+		vocabChecker := len(lmHead) / hiddenSize
+		if vocabChecker != vocabSize {
+			fmt.Printf("⚠️ Vocab size mismatch? Embedding: %d, Head: %d. Using Head size.\n", vocabSize, vocabChecker)
+			vocabSize = vocabChecker
+		}
+	}
 
 	fmt.Printf("✅ Model loaded!\n")
 	fmt.Printf("   Hidden: %d, Vocab: %d, Layers: %d\n\n", hiddenSize, vocabSize, len(network.Layers))
@@ -243,6 +295,9 @@ func generate(prompt string) string {
 	}
 
 	// Generate up to MAX_TOKENS with streaming
+	start := time.Now()
+	generatedCount := 0
+
 	for i := 0; i < MAX_TOKENS; i++ {
 		nextToken, err := generateNextToken(tokens)
 		if err != nil {
@@ -250,6 +305,7 @@ func generate(prompt string) string {
 		}
 
 		tokens = append(tokens, nextToken)
+		generatedCount++
 
 		// Decode and print this token immediately (streaming)
 		tokenText := tk.Decode([]uint32{uint32(nextToken)}, false)
@@ -261,8 +317,14 @@ func generate(prompt string) string {
 		}
 	}
 
-	fmt.Println() // New line after generation
-	return ""     // Already printed, so return empty
+	elapsed := time.Since(start)
+	if generatedCount > 0 {
+		tps := float64(generatedCount) / elapsed.Seconds()
+		fmt.Printf("\n\n(%.2f tokens/s, %d tokens total)\n", tps, generatedCount)
+	} else {
+		fmt.Println()
+	}
+	return "" // Already printed, so return empty
 }
 
 func generateNextToken(tokens []int) (int, error) {
@@ -270,14 +332,17 @@ func generateNextToken(tokens []int) (int, error) {
 	input := make([]float32, len(tokens)*hiddenSize)
 	for t, tokenID := range tokens {
 		if tokenID >= vocabSize || tokenID < 0 {
-			return 0, fmt.Errorf("invalid token ID: %d", tokenID)
+			// Actually check embeddings len in case vocab mismatch
+			if tokenID*hiddenSize >= len(embeddings) {
+				return 0, fmt.Errorf("token ID %d out of bounds for embedding", tokenID)
+			}
 		}
 		for d := 0; d < hiddenSize; d++ {
 			input[t*hiddenSize+d] = embeddings[tokenID*hiddenSize+d]
 		}
 	}
 
-	network.BatchSize = 1
+	network.BatchSize = len(tokens)
 
 	// Forward pass
 	output, _ := network.ForwardCPU(input)
@@ -300,12 +365,16 @@ func generateNextToken(tokens []int) (int, error) {
 	lastIdx := (len(tokens) - 1) * hiddenSize
 	lastTokenNormalized := normalized[lastIdx : lastIdx+hiddenSize]
 
-	// LM head projection (tied weights)
+	// LM head projection
+	// lmHead might be tied (same as embeddings) or separate
 	logits := make([]float32, vocabSize)
 	for v := 0; v < vocabSize; v++ {
 		var sum float32
+		// LM Head is [Vocab, Hidden] usually (linear layer weight)
+		// Index: v * Hidden + d
+		offset := v * hiddenSize
 		for d := 0; d < hiddenSize; d++ {
-			sum += lastTokenNormalized[d] * embeddings[v*hiddenSize+d]
+			sum += lastTokenNormalized[d] * lmHead[offset+d]
 		}
 		logits[v] = sum
 	}
