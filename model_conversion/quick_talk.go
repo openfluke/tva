@@ -342,7 +342,9 @@ func generateNextToken(tokens []int) (int, error) {
 		}
 	}
 
-	network.BatchSize = len(tokens)
+	if !(network.GPU && network.IsGPUMounted()) {
+		network.BatchSize = len(tokens)
+	}
 
 	// Forward pass
 	output, _ := network.ForwardCPU(input)
