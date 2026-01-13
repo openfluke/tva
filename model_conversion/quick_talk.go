@@ -41,6 +41,8 @@ const minPromptRoom = 32
 
 var maxTokens = 50
 var maxSeqLen = 128
+var repetitionPenalty float32 = 1.15
+var repetitionWindow = 64
 
 var systemPrompt = strings.TrimSpace(`
 You are a small, glitchy robot companion.
@@ -562,7 +564,7 @@ func generateWithKV(tokens []int) string {
 	stream := NewStreamer(tokens)
 
 	for i := 0; i < maxTokens; i++ {
-		nextToken, err := nextTokenFromHidden(hidden)
+		nextToken, err := nextTokenFromHidden(hidden, recentTokens(tokens))
 		if err != nil {
 			return fmt.Sprintf("\n[Error: %v]", err)
 		}
@@ -666,6 +668,7 @@ func generateNextToken(tokens []int) (int, error) {
 		logits[v] = sum
 	}
 
+	applyRepetitionPenalty(logits, recentTokens(tokens), repetitionPenalty)
 	next := sampleTopK(logits, 40, 0.9)
 	return next, nil
 }
@@ -938,7 +941,7 @@ func forwardTokenKV(tokenID int, pos int, state *kvCacheState) ([]float32, error
 	return input, nil
 }
 
-func nextTokenFromHidden(hidden []float32) (int, error) {
+func nextTokenFromHidden(hidden []float32, recent []int) (int, error) {
 	if len(hidden) != hiddenSize {
 		return 0, fmt.Errorf("hidden size mismatch: got %d, want %d", len(hidden), hiddenSize)
 	}
@@ -964,15 +967,8 @@ func nextTokenFromHidden(hidden []float32) (int, error) {
 		logits[v] = sum
 	}
 
-	maxIdx := 0
-	maxVal := logits[0]
-	for j := 1; j < vocabSize; j++ {
-		if logits[j] > maxVal {
-			maxVal = logits[j]
-			maxIdx = j
-		}
-	}
-	return maxIdx, nil
+	applyRepetitionPenalty(logits, recent, repetitionPenalty)
+	return sampleTopK(logits, 40, 0.9), nil
 }
 
 func isEOSToken(token int) bool {
@@ -1026,6 +1022,38 @@ func tryLoadTensor(tensors map[string][]float32, keys []string) []float32 {
 		}
 	}
 	return nil
+}
+
+func applyRepetitionPenalty(logits []float32, recent []int, penalty float32) {
+	if penalty <= 1 || len(recent) == 0 {
+		return
+	}
+	seen := make(map[int]struct{}, len(recent))
+	for _, tok := range recent {
+		if tok < 0 || tok >= len(logits) {
+			continue
+		}
+		if _, ok := seen[tok]; ok {
+			continue
+		}
+		seen[tok] = struct{}{}
+		if logits[tok] > 0 {
+			logits[tok] /= penalty
+		} else {
+			logits[tok] *= penalty
+		}
+	}
+}
+
+func recentTokens(tokens []int) []int {
+	if repetitionWindow <= 0 || len(tokens) == 0 {
+		return nil
+	}
+	start := len(tokens) - repetitionWindow
+	if start < 0 {
+		start = 0
+	}
+	return tokens[start:]
 }
 
 func hasToken(tk *tokenizer.Tokenizer, token string) bool {
