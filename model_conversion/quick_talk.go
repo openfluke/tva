@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,9 +27,14 @@ var (
 	hasFinalNorm bool
 	templateType string
 	tk           *tokenizer.Tokenizer
+	useKVCache   bool
+	kvCacheWarn  bool
 )
 
-const MAX_TOKENS = 50
+const (
+	MAX_TOKENS  = 50
+	MAX_SEQ_LEN = 128
+)
 
 func main() {
 	// Discover all models in HuggingFace cache
@@ -127,6 +133,10 @@ func main() {
 		useGPU = true
 		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
 	}
+	kvChoice := readInput("🧠 Use KV cache? (1=yes / 0=no) [0]: ", "0")
+	if kvChoice == "1" {
+		useKVCache = true
+	}
 
 	// Load model
 	network, err = nn.LoadTransformerFromSafetensors(snapshotDir)
@@ -140,8 +150,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("Error loading weights: %v", err)
 	}
-
-	const MAX_SEQ_LEN = 128
 
 	// Mount to GPU if requested
 	if useGPU {
@@ -274,6 +282,10 @@ func generate(prompt string) string {
 		tokens[i] = int(id)
 	}
 
+	if useKVCache {
+		return generateWithKV(tokens)
+	}
+
 	// Generate up to MAX_TOKENS with streaming
 	start := time.Now()
 	generatedCount := 0
@@ -311,6 +323,65 @@ func generate(prompt string) string {
 		fmt.Println()
 	}
 	return "" // Already printed, so return empty
+}
+
+func generateWithKV(tokens []int) string {
+	if len(tokens) > MAX_SEQ_LEN {
+		return fmt.Sprintf("\n[Error: prompt too long for KV cache (max %d tokens)]", MAX_SEQ_LEN)
+	}
+	if network.GPU && !kvCacheWarn {
+		fmt.Println("ℹ️  KV cache path runs on CPU for now.")
+		kvCacheWarn = true
+	}
+
+	state := initKVCacheState(MAX_SEQ_LEN)
+	var err error
+	var hidden []float32
+	for i, tok := range tokens {
+		hidden, err = forwardTokenKV(tok, i, state)
+		if err != nil {
+			return fmt.Sprintf("\n[Error: %v]", err)
+		}
+	}
+
+	start := time.Now()
+	generatedCount := 0
+	prevText := ""
+
+	for i := 0; i < MAX_TOKENS; i++ {
+		nextToken, err := nextTokenFromHidden(hidden)
+		if err != nil {
+			return fmt.Sprintf("\n[Error: %v]", err)
+		}
+
+		tokens = append(tokens, nextToken)
+		generatedCount++
+
+		currentText := tk.Decode(intsToU32(tokens), false)
+		if len(currentText) > len(prevText) {
+			diff := currentText[len(prevText):]
+			fmt.Print(diff)
+			prevText = currentText
+		}
+
+		if isEOSToken(nextToken) {
+			break
+		}
+
+		hidden, err = forwardTokenKV(nextToken, len(tokens)-1, state)
+		if err != nil {
+			return fmt.Sprintf("\n[Error: %v]", err)
+		}
+	}
+
+	elapsed := time.Since(start)
+	if generatedCount > 0 {
+		tps := float64(generatedCount) / elapsed.Seconds()
+		fmt.Printf("\n\n(%.2f tokens/s, %d tokens total)\n", tps, generatedCount)
+	} else {
+		fmt.Println()
+	}
+	return ""
 }
 
 func generateNextToken(tokens []int) (int, error) {
@@ -394,6 +465,274 @@ func generateNextToken(tokens []int) (int, error) {
 		}
 	}
 
+	return maxIdx, nil
+}
+
+type kvCacheLayer struct {
+	K         []float32
+	V         []float32
+	MaxSeq    int
+	NumKVHeads int
+	HeadDim   int
+}
+
+type kvCacheState struct {
+	Layers map[int]*kvCacheLayer
+}
+
+func initKVCacheState(maxSeq int) *kvCacheState {
+	state := &kvCacheState{Layers: make(map[int]*kvCacheLayer)}
+	for i := range network.Layers {
+		cfg := &network.Layers[i]
+		if cfg.Type != nn.LayerMultiHeadAttention {
+			continue
+		}
+		numKV := cfg.NumKVHeads
+		if numKV == 0 {
+			numKV = cfg.NumHeads
+		}
+		kvDim := numKV * cfg.HeadDim
+		state.Layers[i] = &kvCacheLayer{
+			K:          make([]float32, maxSeq*kvDim),
+			V:          make([]float32, maxSeq*kvDim),
+			MaxSeq:     maxSeq,
+			NumKVHeads: numKV,
+			HeadDim:    cfg.HeadDim,
+		}
+	}
+	return state
+}
+
+func embedToken(tokenID int) ([]float32, error) {
+	if tokenID < 0 || tokenID >= vocabSize {
+		return nil, fmt.Errorf("token ID %d out of bounds for vocab", tokenID)
+	}
+	offset := tokenID * hiddenSize
+	if offset+hiddenSize > len(embeddings) {
+		return nil, fmt.Errorf("token ID %d out of bounds for embedding", tokenID)
+	}
+	vec := make([]float32, hiddenSize)
+	copy(vec, embeddings[offset:offset+hiddenSize])
+	return vec, nil
+}
+
+func applyRoPEHead(vec []float32, pos int, headDim int, theta float64) {
+	orig := make([]float32, headDim)
+	copy(orig, vec)
+	half := headDim / 2
+	for d := 0; d < headDim; d++ {
+		freq := 1.0 / math.Pow(theta, float64(2*(d%half))/float64(headDim))
+		angle := freq * float64(pos)
+		c := float32(math.Cos(angle))
+		s := float32(math.Sin(angle))
+		var rotated float32
+		if d < half {
+			rotated = -orig[d+half]
+		} else {
+			rotated = orig[d-half]
+		}
+		vec[d] = orig[d]*c + rotated*s
+	}
+}
+
+func mhaForwardTokenKV(input []float32, cfg *nn.LayerConfig, pos int, cache *kvCacheLayer) ([]float32, error) {
+	if pos >= cache.MaxSeq {
+		return nil, fmt.Errorf("kv cache exceeded max seq len %d", cache.MaxSeq)
+	}
+
+	dModel := cfg.DModel
+	numHeads := cfg.NumHeads
+	numKVHeads := cfg.NumKVHeads
+	if numKVHeads == 0 {
+		numKVHeads = numHeads
+	}
+	headDim := cfg.HeadDim
+	kvDim := numKVHeads * headDim
+
+	q := make([]float32, dModel)
+	for outDim := 0; outDim < dModel; outDim++ {
+		sum := cfg.QBias[outDim]
+		for inDim := 0; inDim < dModel; inDim++ {
+			sum += input[inDim] * cfg.QWeights[inDim*dModel+outDim]
+		}
+		q[outDim] = sum
+	}
+
+	k := make([]float32, kvDim)
+	v := make([]float32, kvDim)
+	for outDim := 0; outDim < kvDim; outDim++ {
+		sumK := cfg.KBias[outDim]
+		sumV := cfg.VBias[outDim]
+		for inDim := 0; inDim < dModel; inDim++ {
+			sumK += input[inDim] * cfg.KWeights[inDim*kvDim+outDim]
+			sumV += input[inDim] * cfg.VWeights[inDim*kvDim+outDim]
+		}
+		k[outDim] = sumK
+		v[outDim] = sumV
+	}
+
+	ropeTheta := float64(cfg.RoPEFreqBase)
+	if ropeTheta == 0 {
+		ropeTheta = 10000.0
+	}
+
+	for head := 0; head < numHeads; head++ {
+		off := head * headDim
+		applyRoPEHead(q[off:off+headDim], pos, headDim, ropeTheta)
+	}
+	for head := 0; head < numKVHeads; head++ {
+		off := head * headDim
+		applyRoPEHead(k[off:off+headDim], pos, headDim, ropeTheta)
+	}
+
+	cacheOffset := pos * kvDim
+	copy(cache.K[cacheOffset:cacheOffset+kvDim], k)
+	copy(cache.V[cacheOffset:cacheOffset+kvDim], v)
+
+	headsPerKV := numHeads / numKVHeads
+	scale := float32(1.0 / math.Sqrt(float64(headDim)))
+	attnOut := make([]float32, dModel)
+
+	for head := 0; head < numHeads; head++ {
+		kvHead := head / headsPerKV
+		qOff := head * headDim
+		qHead := q[qOff : qOff+headDim]
+
+		scores := make([]float32, pos+1)
+		maxScore := float32(-1e9)
+		for t := 0; t <= pos; t++ {
+			kOff := t*kvDim + kvHead*headDim
+			var dot float32
+			for d := 0; d < headDim; d++ {
+				dot += qHead[d] * cache.K[kOff+d]
+			}
+			score := dot * scale
+			scores[t] = score
+			if score > maxScore {
+				maxScore = score
+			}
+		}
+
+		var expSum float32
+		for t := 0; t <= pos; t++ {
+			val := float32(math.Exp(float64(scores[t] - maxScore)))
+			scores[t] = val
+			expSum += val
+		}
+		if expSum == 0 {
+			continue
+		}
+		for t := 0; t <= pos; t++ {
+			scores[t] /= expSum
+		}
+
+		for d := 0; d < headDim; d++ {
+			var sum float32
+			for t := 0; t <= pos; t++ {
+				vOff := t*kvDim + kvHead*headDim
+				sum += scores[t] * cache.V[vOff+d]
+			}
+			attnOut[qOff+d] = sum
+		}
+	}
+
+	output := make([]float32, dModel)
+	for outDim := 0; outDim < dModel; outDim++ {
+		sum := cfg.OutputBias[outDim]
+		for inDim := 0; inDim < dModel; inDim++ {
+			sum += attnOut[inDim] * cfg.OutputWeight[inDim*dModel+outDim]
+		}
+		output[outDim] = sum
+	}
+
+	return output, nil
+}
+
+func forwardTokenKV(tokenID int, pos int, state *kvCacheState) ([]float32, error) {
+	input, err := embedToken(tokenID)
+	if err != nil {
+		return nil, err
+	}
+
+	var residualInput []float32
+	for i := range network.Layers {
+		cfg := &network.Layers[i]
+		switch cfg.Type {
+		case nn.LayerEmbedding:
+			continue
+		case nn.LayerRMSNorm:
+			residualInput = make([]float32, len(input))
+			copy(residualInput, input)
+			input = nn.RmsNormForwardCPU(input, nil, cfg, 1)
+		case nn.LayerMultiHeadAttention:
+			cache := state.Layers[i]
+			if cache == nil {
+				return nil, fmt.Errorf("kv cache missing for layer %d", i)
+			}
+			out, err := mhaForwardTokenKV(input, cfg, pos, cache)
+			if err != nil {
+				return nil, err
+			}
+			if residualInput != nil && len(residualInput) == len(out) {
+				for j := range out {
+					out[j] += residualInput[j]
+				}
+			}
+			residualInput = make([]float32, len(out))
+			copy(residualInput, out)
+			input = out
+		case nn.LayerSwiGLU:
+			_, out := nn.SwiGLUForwardCPU(input, cfg, 1)
+			if residualInput != nil && len(residualInput) == len(out) {
+				for j := range out {
+					out[j] += residualInput[j]
+				}
+			}
+			residualInput = make([]float32, len(out))
+			copy(residualInput, out)
+			input = out
+		default:
+			return nil, fmt.Errorf("kv cache path does not support layer type %v", cfg.Type)
+		}
+	}
+
+	return input, nil
+}
+
+func nextTokenFromHidden(hidden []float32) (int, error) {
+	if len(hidden) != hiddenSize {
+		return 0, fmt.Errorf("hidden size mismatch: got %d, want %d", len(hidden), hiddenSize)
+	}
+
+	normalized := hidden
+	if hasFinalNorm && finalNorm != nil {
+		finalNormConfig := &nn.LayerConfig{
+			Type:     nn.LayerRMSNorm,
+			NormSize: hiddenSize,
+			Gamma:    finalNorm,
+			Epsilon:  1e-6,
+		}
+		normalized = nn.RmsNormForwardCPU(hidden, nil, finalNormConfig, 1)
+	}
+
+	logits := make([]float32, vocabSize)
+	for v := 0; v < vocabSize; v++ {
+		var sum float32
+		offset := v * hiddenSize
+		for d := 0; d < hiddenSize; d++ {
+			sum += normalized[d] * lmHead[offset+d]
+		}
+		logits[v] = sum
+	}
+
+	maxIdx := 0
+	maxVal := logits[0]
+	for j := 1; j < vocabSize; j++ {
+		if logits[j] > maxVal {
+			maxVal = logits[j]
+			maxIdx = j
+		}
+	}
 	return maxIdx, nil
 }
 
