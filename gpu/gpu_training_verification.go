@@ -86,12 +86,12 @@ func getLayerTestConfigs() []LayerTestConfig {
 		{Name: "Dense-256", LayerType: "dense", Activation: "relu", HiddenSize: 256},
 
 		// Conv1D (larger for GPU - NOTE: backward shader incomplete)
-		{Name: "Conv1D-64", LayerType: "conv1d", Activation: "relu", HiddenSize: 64, SeqLength: 16},
-		{Name: "Conv1D-128", LayerType: "conv1d", Activation: "relu", HiddenSize: 128, SeqLength: 16},
+		{Name: "Conv1D-640", LayerType: "conv1d", Activation: "relu", HiddenSize: 640, SeqLength: 16},
+		{Name: "Conv1D-1280", LayerType: "conv1d", Activation: "relu", HiddenSize: 1280, SeqLength: 16},
 
 		// Conv2D (larger sizes for better GPU utilization)
-		{Name: "Conv2D-64", LayerType: "conv2d", Activation: "relu", HiddenSize: 64, UseConvFormat: true},
-		{Name: "Conv2D-128", LayerType: "conv2d", Activation: "relu", HiddenSize: 128, UseConvFormat: true},
+		{Name: "Conv2D-640", LayerType: "conv2d", Activation: "relu", HiddenSize: 640, UseConvFormat: true},
+		{Name: "Conv2D-1280", LayerType: "conv2d", Activation: "relu", HiddenSize: 1280, UseConvFormat: true},
 
 		// RNN (NOTE: backward shader doesn't compute weight gradients yet)
 		{Name: "RNN-128", LayerType: "rnn", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
@@ -114,8 +114,8 @@ func getLayerTestConfigs() []LayerTestConfig {
 		{Name: "SwiGLU-512", LayerType: "swiglu", Activation: "none", HiddenSize: 512},
 
 		// Multi-Head Attention
-		{Name: "MHA-4h", LayerType: "mha", Activation: "none", HiddenSize: 64, SeqLength: 8},
-		{Name: "MHA-8h", LayerType: "mha", Activation: "none", HiddenSize: 128, SeqLength: 8},
+		{Name: "MHA-640", LayerType: "mha", Activation: "none", HiddenSize: 640, SeqLength: 8},
+		{Name: "MHA-1280", LayerType: "mha", Activation: "none", HiddenSize: 1280, SeqLength: 8},
 
 		// Softmax
 		{Name: "Softmax-256", LayerType: "softmax", Activation: "none", HiddenSize: 256},
