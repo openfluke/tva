@@ -2,23 +2,29 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"math"
 	"math/rand"
 	"strings"
 	"time"
 
+	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 )
 
+var gpuFlag = flag.String("gpu", "", "Optional substring to select a specific GPU adapter (e.g. 'nvidia')")
+var filterFlag = flag.String("filter", "", "Optional substring to run specific tests only")
+
 // =============================================================================
-// LOOM v0.0.7 Complete Test Suite
-// Tests all v0.0.7 features + multi-precision save/load for all layer types
+// LOOM v0.0.8 Complete Test Suite
+// Tests all v0.0.8 features + multi-precision save/load for all layer types
 // =============================================================================
 
 func main() {
+	flag.Parse()
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║               LOOM v0.0.7 Complete Feature Test Suite               ║")
+	fmt.Println("║               LOOM v0.0.8 Complete Feature Test Suite               ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -26,7 +32,7 @@ func main() {
 	failed := 0
 
 	// =========================================================================
-	// PART 1: Core v0.0.7 Feature Tests
+	// PART 1: Core v0.0.8 Feature Tests
 	// =========================================================================
 	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("                     PART 1: CORE FEATURE TESTS                        ")
@@ -41,12 +47,16 @@ func main() {
 		testNetworkGrafting,
 	}
 
-	for _, test := range coreTests {
-		if test() {
-			passed++
-		} else {
-			failed++
+	if *filterFlag == "" {
+		for _, test := range coreTests {
+			if test() {
+				passed++
+			} else {
+				failed++
+			}
 		}
+	} else {
+		fmt.Println("Skipping Part 1 (Core Tests) due to filter")
 	}
 
 	// =========================================================================
@@ -84,49 +94,79 @@ func main() {
 	}
 
 	// =========================================================================
-	// PART 3: Additional Feature Tests
+	// PART 3: Advanced Math Tests
 	// =========================================================================
-	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
-	fmt.Println("              PART 3: ADDITIONAL FEATURE TESTS                        ")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════")
+	if *filterFlag == "" {
+		fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
+		fmt.Println("                  PART 3: ADVANCED MATH TESTS                          ")
+		fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
-	additionalTests := []func() bool{
-		testOptimizers,
-		testSchedulers,
-		testActivations,
-		testSoftmaxVariants,
-		testEmbeddingLayer,
-		testIntrospection,
-		testStepTween,
-		testConv1DLayer,
-		testResidualConnection,
-		testEnsembleFeatures,
-		testObserverPattern,
+		additionalTests := []func() bool{
+			testOptimizers,
+			testSchedulers,
+			testActivations,
+			testSoftmaxVariants,
+			testEmbeddingLayer,
+			testIntrospection,
+			testStepTween,
+			testConv1DLayer,
+			testResidualConnection,
+			testEnsembleFeatures,
+			testObserverPattern,
+		}
+
+		for _, test := range additionalTests {
+			if test() {
+				passed++
+			} else {
+				failed++
+			}
+		}
+
+		// =========================================================================
+		// PART 4: Experimental Demos
+		// =========================================================================
+		fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
+		fmt.Println("              PART 4: EXPERIMENTAL DEMOS                              ")
+		fmt.Println("═══════════════════════════════════════════════════════════════════════")
+
+		fmt.Println("\n>>> Running Frozen Specialization Benchmark...")
+		runFrozenSpecDemo()
+
+		fmt.Println("\n>>> Running Stitched Experts (Odds) Demo...")
+		runOddsDemo()
+
+		fmt.Println("\n>>> Running Filter CombineMode Demo...")
+		runFilterDemo()
+	} else {
+		fmt.Println("Skipping Parts 3-4 (Advanced/Demos) due to filter")
 	}
 
-	for _, test := range additionalTests {
-		if test() {
+	// =========================================================================
+	// PART 5: GPU Determinism Tests
+	// =========================================================================
+	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
+	fmt.Println("              PART 5: GPU DETERMINISM TESTS (Forward Pass)             ")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
+
+	if *gpuFlag != "" {
+		fmt.Printf("Requesting GPU adapter matching: %q\n", *gpuFlag)
+		gpu.SetAdapterPreference(*gpuFlag)
+	}
+
+	var failedTests []string
+	for _, test := range gpuLayerTests {
+		if *filterFlag != "" && !strings.Contains(test.Name, *filterFlag) {
+			continue
+		}
+		if runGPULayerTest(test) {
 			passed++
 		} else {
 			failed++
+			failedTests = append(failedTests, test.Name)
 		}
+		fmt.Println()
 	}
-
-	// =========================================================================
-	// PART 4: Experimental Demos
-	// =========================================================================
-	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
-	fmt.Println("              PART 4: EXPERIMENTAL DEMOS                              ")
-	fmt.Println("═══════════════════════════════════════════════════════════════════════")
-
-	fmt.Println("\n>>> Running Frozen Specialization Benchmark...")
-	runFrozenSpecDemo()
-	
-	fmt.Println("\n>>> Running Stitched Experts (Odds) Demo...")
-	runOddsDemo()
-
-	fmt.Println("\n>>> Running Filter CombineMode Demo...")
-	runFilterDemo()
 
 	// Final Summary
 	fmt.Println()
@@ -135,9 +175,12 @@ func main() {
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 
 	if failed > 0 {
-		fmt.Printf("\n❌ %d test(s) failed!\n", failed)
+		fmt.Printf("\n❌ %d test(s) failed:\n", failed)
+		for _, name := range failedTests {
+			fmt.Printf("  • %s\n", name)
+		}
 	} else {
-		fmt.Println("\n🎉 All tests passed! Ready for 0.0.7 release!")
+		fmt.Println("\n🎉 All tests passed! Ready for 0.0.8 release!")
 	}
 }
 
@@ -797,9 +840,9 @@ func testEmbeddingLayer() bool {
 	net.BatchSize = 1
 
 	embConfig := nn.LayerConfig{
-		Type:          nn.LayerEmbedding,
-		VocabSize:     100,
-		EmbeddingDim:  16,
+		Type:         nn.LayerEmbedding,
+		VocabSize:    100,
+		EmbeddingDim: 16,
 	}
 	// Initialize embedding weights
 	embConfig.EmbeddingWeights = make([]float32, 100*16)
@@ -838,8 +881,8 @@ func testIntrospection() bool {
 
 	// Test GetModelSizeInfo
 	sizeInfo := net.GetModelSizeInfo()
-	if len(sizeInfo) != 5 {
-		fmt.Printf("  ❌ Expected 5 dtype sizes, got %d\n", len(sizeInfo))
+	if len(sizeInfo) != 10 {
+		fmt.Printf("  ❌ Expected 10 dtype sizes, got %d\n", len(sizeInfo))
 		return false
 	}
 	fmt.Printf("  ✓ GetModelSizeInfo: %d dtypes analyzed\n", len(sizeInfo))
@@ -878,10 +921,10 @@ func testStepTween() bool {
 		GradientScale: 0.1,
 		Momentum:      0.9,
 	}
-	
+
 	// Create GenericTweenState for float32
 	tweenState := nn.NewGenericTweenState[float32](net, config)
-	
+
 	if tweenState == nil {
 		fmt.Println("  ❌ Failed to create TweenState")
 		return false
@@ -909,7 +952,7 @@ func testStepTween() bool {
 
 	// Forward again
 	output2 := tweenState.ForwardPass(net, input, backend)
-	
+
 	// Check that output changed (learning happened)
 	changed := false
 	for i := range output1.Data {
@@ -921,7 +964,7 @@ func testStepTween() bool {
 	if !changed {
 		fmt.Println("  ⚠ Weights barely changed (may be small learning rate)")
 	} else {
-		fmt.Printf("  ✓ Before: [%.3f, %.3f], After: [%.3f, %.3f]\n", 
+		fmt.Printf("  ✓ Before: [%.3f, %.3f], After: [%.3f, %.3f]\n",
 			output1.Data[0], output1.Data[1], output2.Data[0], output2.Data[1])
 	}
 
@@ -969,7 +1012,7 @@ func testResidualConnection() bool {
 	size := 4
 	input := nn.NewTensor[float32](size)
 	input.Data = []float32{1.0, 2.0, 3.0, 4.0}
-	
+
 	skip := nn.NewTensor[float32](size)
 	skip.Data = []float32{0.5, 0.5, 0.5, 0.5}
 
@@ -979,10 +1022,10 @@ func testResidualConnection() bool {
 		fmt.Println("  ❌ Output size mismatch")
 		return false
 	}
-	
+
 	expected := []float32{1.5, 2.5, 3.5, 4.5}
 	for i := range expected {
-		if math.Abs(float64(output.Data[i] - expected[i])) > 0.0001 {
+		if math.Abs(float64(output.Data[i]-expected[i])) > 0.0001 {
 			fmt.Printf("  ❌ Mismatch at %d: got %.2f, expected %.2f\n", i, output.Data[i], expected[i])
 			return false
 		}
@@ -993,7 +1036,7 @@ func testResidualConnection() bool {
 	gradOutput := nn.NewTensor[float32](size)
 	gradOutput.Data = []float32{1, 1, 1, 1}
 	gradInput, gradSkip := nn.ResidualBackward(gradOutput)
-	
+
 	if gradInput.Data[0] != 1.0 || gradSkip.Data[0] != 1.0 {
 		fmt.Println("  ❌ Gradients failed to propagate correctly")
 		return false
@@ -1021,7 +1064,7 @@ func testEnsembleFeatures() bool {
 		fmt.Println("  ❌ No matches found")
 		return false
 	}
-	
+
 	best := matches[0]
 	if (best.ModelA == "ModelA" && best.ModelB == "ModelB") || (best.ModelA == "ModelB" && best.ModelB == "ModelA") {
 		if best.Coverage != 1.0 {
@@ -1046,20 +1089,20 @@ func testObserverPattern() bool {
 	// Create a simple network
 	net := nn.NewNetwork(2, 1, 1, 2) // 2 inputs, 2 outputs
 	net.BatchSize = 1
-	
+
 	// Check layer config from network
 	// denseConfig := nn.InitDenseLayer(2, 2, nn.ActivationLeakyReLU) // Fix activation
 	denseConfig := nn.InitDenseLayer(2, 2, nn.ActivationLeakyReLU)
 	denseConfig.Observer = nn.NewRecordingObserver("TestModel")
-	
+
 	// Inject the observer into the network layer (trickier since SetLayer copies)
 	// We need to set it, then rely on the fact that forward uses the config in the network
 	net.SetLayer(0, 0, 0, denseConfig)
-	
+
 	// Run forward pass
 	input := []float32{1.0, -1.0}
 	net.ForwardCPU(input)
-	
+
 	// Retrieve the observer back from the network layer to check events
 	// Since SetLayer copies the config struct, we need to extract the observer from the stored config
 	storedConfig := net.GetLayer(0, 0, 0)
@@ -1067,23 +1110,23 @@ func testObserverPattern() bool {
 		fmt.Println("  ❌ Observer not preserved in layer config")
 		return false
 	}
-	
+
 	// Cast back to RecordingObserver
 	recorder, ok := storedConfig.Observer.(*nn.RecordingObserver)
 	if !ok {
 		fmt.Println("  ❌ Observer type mismatch")
 		return false
 	}
-	
+
 	events := recorder.GetRecording()
 	if events.TotalEvents == 0 {
 		fmt.Println("  ❌ No events recorded")
 		return false
 	}
-	
+
 	fmt.Printf("  ✓ Recorded %d events\n", events.TotalEvents)
 	fmt.Printf("  ✓ Event Type: %s, Layer: %s\n", events.Events[0].Type, events.Events[0].Stats.LayerType)
-	
+
 	fmt.Println("  ✅ PASSED: Observer Pattern")
 	return true
 }
@@ -1103,7 +1146,7 @@ func testNetworkGrafting() bool {
 	// Graft them
 	networks := []*nn.Network{net1, net2}
 	graftedConfig, err := nn.GraftNetworks(networks, "concat")
-	
+
 	if err != nil {
 		fmt.Printf("  ❌ GraftNetworks failed: %v\n", err)
 		return false
@@ -1113,7 +1156,7 @@ func testNetworkGrafting() bool {
 		fmt.Printf("  ❌ Expected Parallel layer, got %s\n", graftedConfig.Type)
 		return false
 	}
-	
+
 	if len(graftedConfig.ParallelBranches) != 2 {
 		fmt.Printf("  ❌ Expected 2 branches, got %d\n", len(graftedConfig.ParallelBranches))
 		return false
@@ -1173,10 +1216,10 @@ func runFrozenSpecDemo() {
 func fs_runExperimentForMode(mode string) string {
 	// 2. Setup Network with Frozen Experts (Common Foundation)
 	expert1, expert2 := fs_createExperts(mode)
-	
+
 	// Create Filter Layer
 	gateLayer := nn.InitDenseLayer(fs_InputSize, 2, nn.ActivationScaledReLU)
-	
+
 	// Initialize Gate to random small weights
 	for i := range gateLayer.Kernel {
 		gateLayer.Kernel[i] = (rand.Float32() - 0.5) * 0.1
@@ -1185,7 +1228,7 @@ func fs_runExperimentForMode(mode string) string {
 	filterLayer := nn.LayerConfig{
 		Type:              nn.LayerParallel,
 		ParallelBranches:  []nn.LayerConfig{expert1, expert2},
-		CombineMode:       "filter", 
+		CombineMode:       "filter",
 		FilterGateConfig:  &gateLayer,
 		FilterSoftmax:     nn.SoftmaxStandard,
 		FilterTemperature: 0.5,
@@ -1193,17 +1236,17 @@ func fs_runExperimentForMode(mode string) string {
 
 	net := nn.NewNetwork(fs_InputSize, 1, 1, 1)
 	net.SetLayer(0, 0, 0, filterLayer)
-	
+
 	// 3. Train Gate with Specific Mode
 	fs_trainGate(net, mode)
 
 	// 4. Verify & Compare
 	// We check if it routes correctly for High input (Expert 1) AND Low input (Expert 2)
-	
+
 	// Evaluate High Case (Expect Exp1)
 	val1H, _, netValH, idealH := fs_evaluateNetwork(net, true)
 	diffH := float64(netValH - idealH)
-	
+
 	// Evaluate Low Case (Expect Exp2)
 	_, val2L, netValL, idealL := fs_evaluateNetwork(net, false)
 	diffL := float64(netValL - idealL)
@@ -1212,7 +1255,7 @@ func fs_runExperimentForMode(mode string) string {
 	avgOff := (math.Abs(diffH)/float64(idealH+0.0001) + math.Abs(diffL)/float64(idealL+0.0001)) / 2.0 * 100.0
 
 	// Format result
-	return fmt.Sprintf("%-25s | %-10.4f | %-10.4f | %-10.4f | %-10.4f | %.2f%%", 
+	return fmt.Sprintf("%-25s | %-10.4f | %-10.4f | %-10.4f | %-10.4f | %.2f%%",
 		mode, val1H, val2L, netValH, idealH, avgOff)
 }
 
@@ -1223,7 +1266,7 @@ func fs_createExperts(mode string) (nn.LayerConfig, nn.LayerConfig) {
 	e1 := nn.InitDenseLayer(fs_InputSize, 8, nn.ActivationLeakyReLU)
 	s1 := nn.InitDenseLayer(8, fs_CommonOutputSize, nn.ActivationSigmoid)
 	b1 := nn.InitSequentialLayer(e1, s1)
-	
+
 	fmt.Print("   🎓 Pre-training Expert 1... ")
 	fs_trainExpert(&b1, fs_InputSize, true) // High -> 1.0
 	fs_freezeLayer(&b1)
@@ -1232,7 +1275,7 @@ func fs_createExperts(mode string) (nn.LayerConfig, nn.LayerConfig) {
 	e2 := nn.InitDenseLayer(fs_InputSize, 8, nn.ActivationLeakyReLU)
 	s2 := nn.InitDenseLayer(8, fs_CommonOutputSize, nn.ActivationSigmoid)
 	b2 := nn.InitSequentialLayer(e2, s2)
-	
+
 	fmt.Print("   🎓 Pre-training Expert 2... ")
 	fs_trainExpert(&b2, fs_InputSize, false) // Low -> 1.0
 	fs_freezeLayer(&b2)
@@ -1247,11 +1290,13 @@ func fs_trainExpert(layer *nn.LayerConfig, inputSize int, highDetect bool) {
 
 	// 2. Generate Training Data
 	trainingData := make([]nn.TrainingBatch, 2000)
-	
+
 	for i := 0; i < 2000; i++ {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() * 0.1 }
-		
+		for j := range input {
+			input[j] = rand.Float32() * 0.1
+		}
+
 		targetVal := float32(0.0)
 		if highDetect {
 			if rand.Float32() > 0.5 {
@@ -1264,7 +1309,7 @@ func fs_trainExpert(layer *nn.LayerConfig, inputSize int, highDetect bool) {
 				targetVal = 1.0
 			}
 		}
-		
+
 		trainingData[i] = nn.TrainingBatch{
 			Input:  input,
 			Target: []float32{targetVal},
@@ -1280,7 +1325,7 @@ func fs_trainExpert(layer *nn.LayerConfig, inputSize int, highDetect bool) {
 		LossType:        "mse",
 		PrintEveryBatch: 0,
 	}
-	
+
 	fmt.Printf("   Standard Framework Training (%d samples, %d epochs)...\n", len(trainingData), config.Epochs)
 	_, err := tempNet.Train(trainingData, config)
 	if err != nil {
@@ -1291,42 +1336,44 @@ func fs_trainExpert(layer *nn.LayerConfig, inputSize int, highDetect bool) {
 func fs_trainGate(net *nn.Network, mode string) {
 	// Optimizers
 	sgd := nn.NewSGDOptimizerWithMomentum(0.9, 0, false) // Standard SGD for backprop modes
-	
+
 	// Tween State
 	ts := nn.NewTweenState(net, nil)
 	ts.Config.UseChainRule = true // Default for chain modes
-	ts.Config.Momentum = 0.5 
+	ts.Config.Momentum = 0.5
 
 	for i := 0; i < fs_TrainingEpochs; i++ {
 		// Input
 		input := make([]float32, fs_InputSize)
-		for j := range input { input[j] = rand.Float32() * 0.1 }
-		
+		for j := range input {
+			input[j] = rand.Float32() * 0.1
+		}
+
 		if i%2 == 0 {
 			input[0] = 0.9 // High -> Expert 1 -> Target 1.0
 		} else {
 			input[0] = 0.1 // Low -> Expert 2 -> Target 1.0
 		}
-		
+
 		switch mode {
 		case "Standard Forward/Backward":
 			stepState := net.InitStepState(fs_InputSize)
 			stepState.SetInput(input)
 			net.StepForward(stepState)
 			output := stepState.GetOutput()
-			
+
 			gradOut := make([]float32, 1)
 			gradOut[0] = output[0] - 1.0 // Minimize distance to 1.0
-			
+
 			net.StepBackward(stepState, gradOut)
 			sgd.Step(net, 0.05)
-			
+
 		case "StepBack":
 			stepState := net.InitStepState(fs_InputSize)
 			stepState.SetInput(input)
 			net.StepForward(stepState)
 			output := stepState.GetOutput()
-			
+
 			gradOut := make([]float32, 1)
 			gradOut[0] = output[0] - 1.0
 			net.StepBackward(stepState, gradOut)
@@ -1374,24 +1421,24 @@ func fs_evaluateNetwork(net *nn.Network, isHigh bool) (float32, float32, float32
 		input[0] = 0.1
 	}
 	inputTensor := nn.NewTensorFromSlice(input, fs_InputSize)
-	
+
 	// Network Output
 	netOut, _, _, _ := nn.GenericForwardPass(net, inputTensor, nil)
 	netVal := float32(netOut.Data[0])
-	
+
 	// Experts (Frozen Snapshot)
-	layer := net.GetLayer(0,0,0)
-	
+	layer := net.GetLayer(0, 0, 0)
+
 	e1Net := nn.NewNetwork(fs_InputSize, 1, 1, 1)
-	e1Net.SetLayer(0,0,0, layer.ParallelBranches[0])
+	e1Net.SetLayer(0, 0, 0, layer.ParallelBranches[0])
 	e1Out, _, _, _ := nn.GenericForwardPass(e1Net, inputTensor, nil)
 	val1 := float32(e1Out.Data[0])
-	
+
 	e2Net := nn.NewNetwork(fs_InputSize, 1, 1, 1)
-	e2Net.SetLayer(0,0,0, layer.ParallelBranches[1])
+	e2Net.SetLayer(0, 0, 0, layer.ParallelBranches[1])
 	e2Out, _, _, _ := nn.GenericForwardPass(e2Net, inputTensor, nil)
 	val2 := float32(e2Out.Data[0])
-	
+
 	ideal := val1
 	return val1, val2, netVal, ideal
 }
@@ -1510,46 +1557,48 @@ func odds_demo2MultiBranchStitched() {
 func odds_demo3TrainGateSpecializationStitched() {
 	inputSize := 8
 	commonOutputSize := 4
-	
+
 	// -----------------------------------------------------------
 	// -----------------------------------------------------------
 	// STEP 1: Create two odd-sized networks and pre-train them
 	// Expert 1 (Size 3): Detects High input[0]
 	// Expert 2 (Size 5): Detects Low input[0]
 	// -----------------------------------------------------------
-	
+
 	// Training Expert 1 (Size 3) + Stitch (Size 4)
 	fmt.Printf("   🎓 Pre-training Expert 1 (Size 3 -> 4) to detect HIGH input[0]...\n")
 	expert1Core := nn.InitDenseLayer(inputSize, 3, nn.ActivationSigmoid)
 	stitch1 := nn.InitStitchLayer(3, commonOutputSize)
-	
+
 	net1 := nn.NewNetwork(inputSize, 1, 1, 2)
 	net1.SetLayer(0, 0, 0, expert1Core)
 	net1.SetLayer(0, 0, 1, stitch1)
-	
+
 	// Generate training data for Expert 1
 	// Task: if input[0] is high, output high
 	trainData1 := make([]nn.TrainingBatch, 2000)
 	for i := range trainData1 {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() }
-		
+		for j := range input {
+			input[j] = rand.Float32()
+		}
+
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
 			input[0] = 0.8 + rand.Float32()*0.2 // High input
 			target = 1.0
 		} else {
-			input[0] = rand.Float32()*0.2 // Low input
+			input[0] = rand.Float32() * 0.2 // Low input
 			target = 0.0
 		}
 		trainData1[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
 
 	config1 := &nn.TrainingConfig{
-		Epochs: 10,
+		Epochs:       10,
 		LearningRate: 0.1,
-		Verbose: false,
-		LossType: "mse",
+		Verbose:      false,
+		LossType:     "mse",
 	}
 	net1.Train(trainData1, config1)
 
@@ -1559,38 +1608,40 @@ func odds_demo3TrainGateSpecializationStitched() {
 	fmt.Printf("   🎓 Pre-training Expert 2 (Size 5 -> 4) to detect LOW input[0]...\n")
 	expert2Core := nn.InitDenseLayer(inputSize, 5, nn.ActivationSigmoid)
 	stitch2 := nn.InitStitchLayer(5, commonOutputSize)
-	
+
 	net2 := nn.NewNetwork(inputSize, 1, 1, 2)
 	net2.SetLayer(0, 0, 0, expert2Core)
 	net2.SetLayer(0, 0, 1, stitch2)
-	
+
 	// Generate training data for Expert 2
 	// Logic: Low input -> High Output
 	trainData2 := make([]nn.TrainingBatch, 2000)
 	for i := range trainData2 {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() }
-		
+		for j := range input {
+			input[j] = rand.Float32()
+		}
+
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
-			input[0] = rand.Float32()*0.2 // Low input
-			target = 1.0 // High Output
-			// Note: This logic seems flipped compared to Ex 1? 
+			input[0] = rand.Float32() * 0.2 // Low input
+			target = 1.0                    // High Output
+			// Note: This logic seems flipped compared to Ex 1?
 			// Ex1: High Input -> High Output
 			// Ex2: Low Input -> High Output
 			// Yes, both want to output High when they see their "preferred" signal.
 		} else {
 			input[0] = 0.8 + rand.Float32()*0.2 // High input
-			target = 0.0 // Low Output
+			target = 0.0                        // Low Output
 		}
 		trainData2[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
 
 	config2 := &nn.TrainingConfig{
-		Epochs: 10,
+		Epochs:       10,
 		LearningRate: 0.1,
-		Verbose: false,
-		LossType: "mse",
+		Verbose:      false,
+		LossType:     "mse",
 	}
 	net2.Train(trainData2, config2)
 
@@ -1618,29 +1669,31 @@ func odds_demo3TrainGateSpecializationStitched() {
 	// STEP 4: Train only the gate layer
 	// -----------------------------------------------------------
 	fmt.Printf("   🏋️ Training GATE layer for 1000 steps...\n")
-	
+
 	ts := nn.NewTweenState(net, nil) // TweenState for main net
 	ts.Config.UseChainRule = true
-	
+
 	for epoch := 0; epoch < 1000; epoch++ {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() }
-		
+		for j := range input {
+			input[j] = rand.Float32()
+		}
+
 		// Target logic:
 		// HIGH input[0] -> Should route to Expert 1
 		// LOW input[0]  -> Should route to Expert 2
-		
+
 		if epoch%2 == 0 {
 			input[0] = 0.9 // High
 		} else {
 			input[0] = 0.1 // Low
 		}
-		
+
 		// If gate works, output will be high (since experts are specialized to output high for their preferred input).
 		// So we train the whole net to maximize output.
 		// Since experts are frozen (we don't update them here effectively via this simple call unless we passed gradients everywhere),
 		// essentially we are just updating the gate to find the max-output path.
-		
+
 		// Using TweenStep to maximize output (target [1.0])
 		ts.TweenStep(net, input, 0, 1, 0.05)
 	}
@@ -1649,16 +1702,18 @@ func odds_demo3TrainGateSpecializationStitched() {
 	// STEP 5: Test
 	// -----------------------------------------------------------
 	fmt.Printf("   📊 Testing Selection:\n")
-	
-	highIn := make([]float32, inputSize); highIn[0] = 0.9
-	lowIn := make([]float32, inputSize); lowIn[0] = 0.1
-	
+
+	highIn := make([]float32, inputSize)
+	highIn[0] = 0.9
+	lowIn := make([]float32, inputSize)
+	lowIn[0] = 0.1
+
 	hOut, _ := net.ForwardCPU(highIn)
 	lOut, _ := net.ForwardCPU(lowIn)
-	
+
 	fmt.Printf("      High Input → Output: %.4f (Expert 1 preferred)\n", hOut[0])
 	fmt.Printf("      Low Input  → Output: %.4f (Expert 2 preferred)\n", lOut[0])
-	
+
 	diff := math.Abs(float64(hOut[0] - lOut[0]))
 	if hOut[0] > 0.5 && lOut[0] > 0.5 {
 		fmt.Printf("   ✅ Gate learned to pick the right expert (both outputs high)!\n")
@@ -1820,7 +1875,7 @@ func fd_demo3TrainGateSpecialization() {
 	// -----------------------------------------------------------
 	fmt.Printf("   🎓 Pre-training Expert 1 (responds to HIGH first element)...\n")
 	expert1 := nn.InitDenseLayer(inputSize, expertSize, nn.ActivationSigmoid)
-	
+
 	// Create temp net for training Expert 1
 	e1Net := nn.NewNetwork(inputSize, 1, 1, 1)
 	e1Net.SetLayer(0, 0, 0, expert1)
@@ -1829,31 +1884,33 @@ func fd_demo3TrainGateSpecialization() {
 	trainData1 := make([]nn.TrainingBatch, 2000)
 	for i := range trainData1 {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() }
-		
+		for j := range input {
+			input[j] = rand.Float32()
+		}
+
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
 			input[0] = 0.7 + rand.Float32()*0.3 // High
 			target = 1.0
 		} else {
-			input[0] = rand.Float32()*0.3 // Low
+			input[0] = rand.Float32() * 0.3 // Low
 			target = 0.0
 		}
 		trainData1[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
-	
+
 	config1 := &nn.TrainingConfig{
-		Epochs: 10,
+		Epochs:       10,
 		LearningRate: 0.1,
-		Verbose: false,
-		LossType: "mse",
+		Verbose:      false,
+		LossType:     "mse",
 	}
 	e1Net.Train(trainData1, config1)
 	expert1 = *e1Net.GetLayer(0, 0, 0) // Update config
 
 	fmt.Printf("   🎓 Pre-training Expert 2 (responds to LOW first element)...\n")
 	expert2 := nn.InitDenseLayer(inputSize, expertSize, nn.ActivationSigmoid)
-	
+
 	// Create temp net for training Expert 2
 	e2Net := nn.NewNetwork(inputSize, 1, 1, 1)
 	e2Net.SetLayer(0, 0, 0, expert2)
@@ -1862,11 +1919,13 @@ func fd_demo3TrainGateSpecialization() {
 	trainData2 := make([]nn.TrainingBatch, 2000)
 	for i := range trainData2 {
 		input := make([]float32, inputSize)
-		for j := range input { input[j] = rand.Float32() }
-		
+		for j := range input {
+			input[j] = rand.Float32()
+		}
+
 		target := float32(0.0)
 		if rand.Float32() > 0.5 {
-			input[0] = rand.Float32()*0.3 // Low
+			input[0] = rand.Float32() * 0.3 // Low
 			target = 1.0
 		} else {
 			input[0] = 0.7 + rand.Float32()*0.3 // High
@@ -1874,12 +1933,12 @@ func fd_demo3TrainGateSpecialization() {
 		}
 		trainData2[i] = nn.TrainingBatch{Input: input, Target: []float32{target}}
 	}
-	
+
 	config2 := &nn.TrainingConfig{
-		Epochs: 10,
+		Epochs:       10,
 		LearningRate: 0.1,
-		Verbose: false,
-		LossType: "mse",
+		Verbose:      false,
+		LossType:     "mse",
 	}
 	e2Net.Train(trainData2, config2)
 	expert2 = *e2Net.GetLayer(0, 0, 0) // Update config
@@ -1908,7 +1967,7 @@ func fd_demo3TrainGateSpecialization() {
 	// STEP 3: Test without training gate - should give mixed results
 	// -----------------------------------------------------------
 	fmt.Printf("   📊 Testing BEFORE gate training:\n")
-	
+
 	// Test with high first element
 	highInput := make([]float32, inputSize)
 	for j := range highInput {
@@ -1916,7 +1975,7 @@ func fd_demo3TrainGateSpecialization() {
 	}
 	highInput[0] = 0.9
 
-	// Test with low first element  
+	// Test with low first element
 	lowInput := make([]float32, inputSize)
 	for j := range lowInput {
 		lowInput[j] = rand.Float32() * 0.5
@@ -1925,7 +1984,7 @@ func fd_demo3TrainGateSpecialization() {
 
 	highOut, _ := net.ForwardCPU(highInput)
 	lowOut, _ := net.ForwardCPU(lowInput)
-	
+
 	fmt.Printf("      High input[0]=0.9 → output=%.4f\n", highOut[0])
 	fmt.Printf("      Low input[0]=0.1  → output=%.4f\n", lowOut[0])
 
@@ -1933,7 +1992,7 @@ func fd_demo3TrainGateSpecialization() {
 	// STEP 4: Train only the gate layer
 	// -----------------------------------------------------------
 	fmt.Printf("   🏋️ Training GATE layer for 2000 steps...\n")
-	
+
 	ts := nn.NewTweenState(net, nil)
 	ts.Config.LinkBudgetScale = 0.3
 	ts.Config.UseChainRule = true
@@ -1943,7 +2002,7 @@ func fd_demo3TrainGateSpecialization() {
 		for j := range input {
 			input[j] = rand.Float32() * 0.5
 		}
-		
+
 		// Half the time: high first element
 		// Half the time: low first element
 		if epoch%2 == 0 {
@@ -1951,7 +2010,7 @@ func fd_demo3TrainGateSpecialization() {
 		} else {
 			input[0] = rand.Float32() * 0.3
 		}
-		
+
 		// Use targetIdx=0 for single output, outputSize=1
 		ts.TweenStep(net, input, 0, 1, 0.01)
 	}
@@ -1963,17 +2022,447 @@ func fd_demo3TrainGateSpecialization() {
 
 	highOut2, _ := net.ForwardCPU(highInput)
 	lowOut2, _ := net.ForwardCPU(lowInput)
-	
+
 	fmt.Printf("      High input[0]=0.9 → output=%.4f (was %.4f)\n", highOut2[0], highOut[0])
 	fmt.Printf("      Low input[0]=0.1  → output=%.4f (was %.4f)\n", lowOut2[0], lowOut[0])
 
 	// Check if outputs changed (indicating gate learned something)
 	highDiff := math.Abs(float64(highOut2[0] - highOut[0]))
 	lowDiff := math.Abs(float64(lowOut2[0] - lowOut[0]))
-	
+
 	if highDiff > 0.01 || lowDiff > 0.01 {
 		fmt.Printf("   ✅ Gate learned to differentiate! (changes: high=%.4f, low=%.4f)\n", highDiff, lowDiff)
 	} else {
 		fmt.Printf("   ⚠️ Gate didn't learn much (changes: high=%.4f, low=%.4f)\n", highDiff, lowDiff)
 	}
+}
+
+// =============================================================================
+// PART 5: GPU Determinism Tests (Ported from det_gpu_v_cpu.go)
+// =============================================================================
+
+// GPULayerTestCase defines a test case for a specific hidden layer type
+type GPULayerTestCase struct {
+	Name       string
+	JSONConfig string // Full network JSON config
+	InputSize  int    // Network input size
+	InputType  string // "uniform" (default), "indices" (for embedding)
+	VocabSize  int    // For "indices" type, max token ID
+}
+
+var gpuLayerTests = []GPULayerTestCase{
+	{
+		Name: "Dense_Batch1",
+		JSONConfig: `{
+			"id": "gpu_test_dense",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "Dense_Batch4",
+		JSONConfig: `{
+			"id": "gpu_test_dense_b4",
+			"batch_size": 4,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+				{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+				{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+			]
+		}`,
+		InputSize: 512,
+	},
+	{
+		Name:      "Embedding",
+		InputType: "indices",
+		VocabSize: 100,
+		JSONConfig: `{
+			"id": "gpu_test_embedding",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "embedding", "vocab_size": 100, "embedding_dim": 64},
+				{"type": "dense", "activation": "tanh", "input_height": 64, "output_height": 64},
+				{"type": "dense", "activation": "sigmoid", "input_height": 64, "output_height": 2}
+			]
+		}`,
+		InputSize: 1, // 1 token index
+	},
+	{
+		Name: "Residual_Skip",
+		JSONConfig: `{
+			"id": "gpu_test_residual",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 256, "output_height": 256},
+				{
+					"type": "residual", 
+					"branches": [
+						{"type": "dense", "activation": "tanh", "input_height": 256, "output_height": 256}
+					]
+				},
+				{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 2}
+			]
+		}`,
+		InputSize: 256,
+	},
+	{
+		Name: "Parallel_MoE",
+		JSONConfig: `{
+			"id": "gpu_test_parallel",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 256, "output_height": 256},
+				{
+					"type": "parallel",
+					"combine_mode": "concat",
+					"branches": [
+						{"type": "dense", "activation": "tanh", "input_height": 256, "output_height": 128},
+						{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 128}
+					]
+				},
+				{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 2}
+			]
+		}`,
+		InputSize: 256,
+	},
+	{
+		Name: "LayerNorm",
+		JSONConfig: `{
+			"id": "gpu_test_layernorm",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "layer_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "RMSNorm",
+		JSONConfig: `{
+			"id": "gpu_test_rmsnorm",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "rms_norm", "norm_size": 2048, "epsilon": 1e-5},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "Softmax",
+		JSONConfig: `{
+			"id": "gpu_test_softmax",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "softmax", "temperature": 1.0},
+				{"type": "softmax", "temperature": 1.0},
+				{"type": "softmax", "temperature": 1.0},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "Conv1D",
+		JSONConfig: `{
+			"id": "gpu_test_conv1d",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
+				{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
+				{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 32},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "Conv2D",
+		JSONConfig: `{
+			"id": "gpu_test_conv2d",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
+				{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
+				{"type": "conv2d", "input_channels": 8, "filters": 8, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 16, "input_width": 16, "output_height": 16, "output_width": 16},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "SwiGLU",
+		JSONConfig: `{
+			"id": "gpu_test_swiglu",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+				{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+				{"type": "swiglu", "input_height": 2048, "output_height": 2048},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "RNN",
+		JSONConfig: `{
+			"id": "gpu_test_rnn",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+				{"type": "rnn", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+				{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+			]
+		}`,
+		InputSize: 512,
+	},
+	{
+		Name: "LSTM",
+		JSONConfig: `{
+			"id": "gpu_test_lstm",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+				{"type": "lstm", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+				{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+			]
+		}`,
+		InputSize: 512,
+	},
+	{
+		Name: "MHA",
+		JSONConfig: `{
+			"id": "gpu_test_mha",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+				{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+				{"type": "multi_head_attention", "d_model": 256, "num_heads": 8},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
+		Name: "Combined_Hybrid",
+		JSONConfig: `{
+			"id": "gpu_test_combined",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 9,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 64, "output_height": 64},
+				{"type": "swiglu", "input_height": 64, "output_height": 512},
+				{"type": "layer_norm", "norm_size": 512, "epsilon": 1e-5},
+				{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 8},
+				{"type": "rnn", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+				{"type": "lstm", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+				{"type": "multi_head_attention", "d_model": 64, "num_heads": 8, "seq_length": 8},
+				{"type": "rms_norm", "norm_size": 64, "epsilon": 1e-5},
+				{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+			]
+		}`,
+		InputSize: 64,
+	},
+}
+
+func runGPULayerTest(test GPULayerTestCase) bool {
+	fmt.Printf("┌──────────────────────────────────────────────────────────────────────┐\n")
+	fmt.Printf("│ Testing: %-59s│\n", test.Name)
+	fmt.Printf("└──────────────────────────────────────────────────────────────────────┘\n")
+
+	// Recover from GPU panics
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("  ❌ GPU panic: %v\n", r)
+		}
+	}()
+
+	// Build network from config
+	network, err := nn.BuildNetworkFromJSON(test.JSONConfig)
+	if err != nil {
+		fmt.Printf("  ❌ Build error: %v\n", err)
+		return false
+	}
+	// DO NOT force BatchSize to 1 here, let JSON config dictate it.
+	// But ensure network.BatchSize is populated if 0 (BuildNetworkFromJSON should do this)
+	// network.BatchSize is set by JSON config, do not override
+
+	network.InitializeWeights()
+
+	// Create input
+	totalInputSize := test.InputSize * network.BatchSize
+	input := make([]float32, totalInputSize)
+
+	if test.InputType == "indices" {
+		vocab := test.VocabSize
+		if vocab <= 0 {
+			vocab = 100 // Default safety
+		}
+		for i := range input {
+			input[i] = float32(rand.Intn(vocab))
+		}
+	} else {
+		for i := range input {
+			input[i] = rand.Float32()*2 - 1
+		}
+	}
+
+	// CPU Forward
+	network.GPU = false
+	cpuOutput, _ := network.ForwardCPU(input)
+
+	// GPU Forward
+	gpuForwardOK := false
+	var gpuOutput []float32
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				fmt.Printf("  ❌ GPU Forward panic: %v\n", r)
+			}
+		}()
+
+		network.GPU = true
+		err = network.WeightsToGPU()
+		if err != nil {
+			fmt.Printf("  ❌ GPU mount error: %v\n", err)
+			return
+		}
+
+		gpuOutput, _ = network.ForwardCPU(input)
+		gpuForwardOK = true
+	}()
+
+	network.ReleaseGPUWeights()
+
+	if !gpuForwardOK {
+		return false
+	}
+
+	return compareOutputs(cpuOutput, gpuOutput)
+}
+
+func compareOutputs(cpu, gpu []float32) bool {
+	if len(cpu) != len(gpu) {
+		fmt.Printf("  ❌ Size mismatch: CPU=%d, GPU=%d\n", len(cpu), len(gpu))
+		return false
+	}
+
+	var maxDiff float64
+	var sumDiff float64
+	var meanDiff float64
+
+	// Track indexes of max diff
+	maxDiffIdx := -1
+
+	for i := range cpu {
+		diff := math.Abs(float64(cpu[i] - gpu[i]))
+		if diff > maxDiff {
+			maxDiff = diff
+			maxDiffIdx = i
+		}
+		sumDiff += diff
+	}
+
+	if len(cpu) > 0 {
+		meanDiff = sumDiff / float64(len(cpu))
+	}
+
+	fmt.Printf("  • Max Diff:  %.10f (Idx: %d)\n", maxDiff, maxDiffIdx)
+	fmt.Printf("  • Mean Diff: %.10f\n", meanDiff)
+
+	passed := false
+	if maxDiff == 0 {
+		fmt.Println("  ✅ [GOLD STANDARD] Exact Bit-Determinism")
+		passed = true
+	} else if maxDiff < 1e-7 {
+		fmt.Println("  ✅ [EXCELLENT] Near-Machine-Epsilon (< 1e-7)")
+		passed = true
+	} else if maxDiff < 1e-5 {
+		fmt.Println("  ✅ [INDUSTRY STANDARD] Functional Equivalence (< 1e-5)")
+		passed = true
+	} else if maxDiff < 1e-3 {
+		fmt.Println("  ⚠️ [ACCEPTABLE DRIFT] Approximate Match (< 1e-3)")
+		passed = true
+	} else {
+		fmt.Println("  ❌ [FAILURE] Significant Divergence (> 1e-3)")
+		passed = false
+	}
+
+	// Always print first few samples to show it's working
+	fmt.Println("  • Output Sample (First 5):")
+	limit := 5
+	if len(cpu) < limit {
+		limit = len(cpu)
+	}
+	for k := 0; k < limit; k++ {
+		fmt.Printf("    [%d] CPU: %14.10f | GPU: %14.10f | Diff: %.10f\n",
+			k, cpu[k], gpu[k], math.Abs(float64(cpu[k]-gpu[k])))
+	}
+
+	return passed
 }

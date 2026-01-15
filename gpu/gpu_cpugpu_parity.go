@@ -26,6 +26,8 @@ type GPULayerTestCase struct {
 	Name       string
 	JSONConfig string // Full network JSON config
 	InputSize  int    // Network input size
+	InputType  string // "uniform" (default), "indices" (for embedding)
+	VocabSize  int    // For "indices" type, max token ID
 }
 
 // GPUTestResultRow holds the result of testing a layer type
@@ -61,7 +63,7 @@ func main() {
 	// Define all layer types to test with proper full network configs
 	layerTests := []GPULayerTestCase{
 		{
-			Name: "Dense",
+			Name: "Dense_Batch1",
 			JSONConfig: `{
 				"id": "gpu_test_dense",
 				"batch_size": 1,
@@ -77,6 +79,84 @@ func main() {
 				]
 			}`,
 			InputSize: 2048,
+		},
+		{
+			Name: "Dense_Batch4",
+			JSONConfig: `{
+				"id": "gpu_test_dense_b4",
+				"batch_size": 4,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+					{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+					{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+				]
+			}`,
+			InputSize: 512,
+		},
+		{
+			Name:      "Embedding",
+			InputType: "indices",
+			VocabSize: 100,
+			JSONConfig: `{
+				"id": "gpu_test_embedding",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "embedding", "vocab_size": 100, "embedding_dim": 64},
+					{"type": "dense", "activation": "tanh", "input_height": 64, "output_height": 64},
+					{"type": "dense", "activation": "sigmoid", "input_height": 64, "output_height": 2}
+				]
+			}`,
+			InputSize: 1, // 1 token index
+		},
+		{
+			Name: "Residual_Skip",
+			JSONConfig: `{
+				"id": "gpu_test_residual",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 256, "output_height": 256},
+					{
+						"type": "residual", 
+						"branches": [
+							{"type": "dense", "activation": "tanh", "input_height": 256, "output_height": 256}
+						]
+					},
+					{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 2}
+				]
+			}`,
+			InputSize: 256,
+		},
+		{
+			Name: "Parallel_MoE",
+			JSONConfig: `{
+				"id": "gpu_test_parallel",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 3,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 256, "output_height": 256},
+					{
+						"type": "parallel",
+						"combine_mode": "concat",
+						"branches": [
+							{"type": "dense", "activation": "tanh", "input_height": 256, "output_height": 128},
+							{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 128}
+						]
+					},
+					{"type": "dense", "activation": "sigmoid", "input_height": 256, "output_height": 2}
+				]
+			}`,
+			InputSize: 256,
 		},
 		{
 			Name: "LayerNorm",
@@ -243,6 +323,28 @@ func main() {
 			}`,
 			InputSize: 2048,
 		},
+		{
+			Name: "Combined_Hybrid",
+			JSONConfig: `{
+				"id": "gpu_test_combined",
+				"batch_size": 1,
+				"grid_rows": 1,
+				"grid_cols": 1,
+				"layers_per_cell": 9,
+				"layers": [
+					{"type": "dense", "activation": "leaky_relu", "input_height": 64, "output_height": 64},
+					{"type": "swiglu", "input_height": 64, "output_height": 512},
+					{"type": "layer_norm", "norm_size": 512, "epsilon": 1e-5},
+					{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 8},
+					{"type": "rnn", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+					{"type": "lstm", "input_size": 64, "hidden_size": 64, "seq_length": 8},
+					{"type": "multi_head_attention", "d_model": 64, "num_heads": 8, "seq_length": 8},
+					{"type": "rms_norm", "norm_size": 64, "epsilon": 1e-5},
+					{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
+				]
+			}`,
+			InputSize: 64,
+		},
 	}
 
 	results := make([]GPUTestResultRow, 0)
@@ -299,13 +401,26 @@ func runGPULayerTest(test GPULayerTestCase) (result GPUTestResultRow) {
 		result.ErrMsg = fmt.Sprintf("build error: %v", err)
 		return result
 	}
-	network.BatchSize = 1
+	// network.BatchSize is set by JSON config, do not override
+
 	network.InitializeWeights()
 
 	// Create input
-	input := make([]float32, test.InputSize)
-	for i := range input {
-		input[i] = rand.Float32()*2 - 1
+	totalInputSize := test.InputSize * network.BatchSize
+	input := make([]float32, totalInputSize)
+
+	if test.InputType == "indices" {
+		vocab := test.VocabSize
+		if vocab <= 0 {
+			vocab = 100 // Default safety
+		}
+		for i := range input {
+			input[i] = float32(rand.Intn(vocab))
+		}
+	} else {
+		for i := range input {
+			input[i] = rand.Float32()*2 - 1
+		}
 	}
 
 	// CPU Forward
@@ -355,7 +470,14 @@ func runGPULayerTest(test GPULayerTestCase) (result GPUTestResultRow) {
 	network.GPU = false
 	network.ReleaseGPUWeights()
 	network.ForwardCPU(input)
-	dOutput := []float32{1.0, 1.0}
+
+	// Construct dOutput matching batch size (assuming output size is 2 for all tests)
+	singleOutputSize := 2
+	dOutput := make([]float32, singleOutputSize*network.BatchSize)
+	for i := range dOutput {
+		dOutput[i] = 1.0
+	}
+
 	_, cpuBackwardTime := network.BackwardCPU(dOutput)
 	result.BackwardCPU = cpuBackwardTime
 
