@@ -361,18 +361,44 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 }
 
 func cloneWeights(src, dst *nn.Network) {
-	// Clone all layer weights from src to dst
 	for i := 0; i < src.TotalLayers(); i++ {
-		// Clone kernels
-		if len(src.Layers[i].Kernel) > 0 {
-			dst.Layers[i].Kernel = make([]float32, len(src.Layers[i].Kernel))
-			copy(dst.Layers[i].Kernel, src.Layers[i].Kernel)
+		s := &src.Layers[i]
+		d := &dst.Layers[i]
+
+		// Generic
+		if len(s.Kernel) > 0 {
+			d.Kernel = append([]float32(nil), s.Kernel...)
 		}
-		// Clone biases
-		if len(src.Layers[i].Bias) > 0 {
-			dst.Layers[i].Bias = make([]float32, len(src.Layers[i].Bias))
-			copy(dst.Layers[i].Bias, src.Layers[i].Bias)
+		if len(s.Bias) > 0 {
+			d.Bias = append([]float32(nil), s.Bias...)
 		}
+
+		// RNN
+		if len(s.WeightIH) > 0 {
+			d.WeightIH = append([]float32(nil), s.WeightIH...)
+		}
+		if len(s.WeightHH) > 0 {
+			d.WeightHH = append([]float32(nil), s.WeightHH...)
+		}
+		if len(s.BiasH) > 0 {
+			d.BiasH = append([]float32(nil), s.BiasH...)
+		}
+
+		// LSTM (4 gates)
+		d.WeightIH_i = append([]float32(nil), s.WeightIH_i...)
+		d.WeightIH_f = append([]float32(nil), s.WeightIH_f...)
+		d.WeightIH_g = append([]float32(nil), s.WeightIH_g...)
+		d.WeightIH_o = append([]float32(nil), s.WeightIH_o...)
+
+		d.WeightHH_i = append([]float32(nil), s.WeightHH_i...)
+		d.WeightHH_f = append([]float32(nil), s.WeightHH_f...)
+		d.WeightHH_g = append([]float32(nil), s.WeightHH_g...)
+		d.WeightHH_o = append([]float32(nil), s.WeightHH_o...)
+
+		d.BiasH_i = append([]float32(nil), s.BiasH_i...)
+		d.BiasH_f = append([]float32(nil), s.BiasH_f...)
+		d.BiasH_g = append([]float32(nil), s.BiasH_g...)
+		d.BiasH_o = append([]float32(nil), s.BiasH_o...)
 	}
 }
 
