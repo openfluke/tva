@@ -1,10 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"math"
 	"math/rand"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/openfluke/loom/gpu"
@@ -575,12 +579,58 @@ func main() {
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
+	// Get ALL layer configurations
+	allLayerConfigs := getLayerTestConfigs()
+
+	// Interactive menu for layer selection
+	fmt.Println("Select layers to test:")
+	for i, config := range allLayerConfigs {
+		fmt.Printf("%2d. %s\n", i+1, config.Name)
+	}
+	fmt.Printf("%2d. Run ALL tests\n", len(allLayerConfigs)+1)
+	fmt.Println()
+	fmt.Print("Enter selection (comma-separated numbers, e.g., 1,2,3 or press Enter for all): ")
+
+	// Read user input
+	reader := bufio.NewReader(os.Stdin)
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+
+	var layerConfigs []LayerTestConfig
+	if input == "" || input == fmt.Sprintf("%d", len(allLayerConfigs)+1) {
+		// Run all tests
+		layerConfigs = allLayerConfigs
+		fmt.Println("\n→ Running ALL tests\n")
+	} else {
+		// Parse comma-separated selections
+		selections := strings.Split(input, ",")
+		selectedMap := make(map[int]bool)
+
+		for _, sel := range selections {
+			sel = strings.TrimSpace(sel)
+			num, err := strconv.Atoi(sel)
+			if err == nil && num >= 1 && num <= len(allLayerConfigs) {
+				selectedMap[num-1] = true
+			}
+		}
+
+		for idx := range allLayerConfigs {
+			if selectedMap[idx] {
+				layerConfigs = append(layerConfigs, allLayerConfigs[idx])
+			}
+		}
+
+		if len(layerConfigs) == 0 {
+			fmt.Println("No valid selections, running all tests...")
+			layerConfigs = allLayerConfigs
+		} else {
+			fmt.Printf("\n→ Running %d selected test(s)\n\n", len(layerConfigs))
+		}
+	}
+
 	// Generate dataset
 	fmt.Printf("Generating linearly separable dataset (100 samples)...\n\n")
 	dataset := generateSimpleDataset(100)
-
-	// Get layer configurations to test
-	layerConfigs := getLayerTestConfigs()
 
 	var cpuResults []LayerTestResult
 	var gpuResults []LayerTestResult
