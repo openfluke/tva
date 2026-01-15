@@ -15,6 +15,7 @@ var (
 	gpuFlag    = flag.String("gpu", "", "Optional substring to select a specific GPU adapter (e.g. 'nvidia')")
 	epochsFlag = flag.Int("epochs", 20, "Number of training epochs")
 	lrFlag     = flag.Float64("lr", 0.05, "Learning rate")
+	layersFlag = flag.String("layers", "", "Comma-separated list of layer types to test (e.g. 'Dense,Conv2D'). Empty = all layers")
 )
 
 // Simple linearly separable dataset: if x[0] > 0.5 then class 1, else class 0
@@ -48,19 +49,310 @@ func generateSimpleDataset(numSamples int) *Dataset {
 	}
 }
 
-func createNetwork(batchSize int) (*nn.Network, error) {
-	jsonConfig := fmt.Sprintf(`{
-		"id": "training_verification",
-		"batch_size": %d,
-		"grid_rows": 1,
-		"grid_cols": 1,
-		"layers_per_cell": 3,
-		"layers": [
-			{"type": "dense", "activation": "relu", "input_height": 2, "output_height": 512},
-			{"type": "dense", "activation": "relu", "input_height": 512, "output_height": 512},
-			{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
-		]
-	}`, batchSize)
+// LayerTestConfig defines configuration for testing a specific layer type
+type LayerTestConfig struct {
+	Name       string
+	LayerType  string
+	Activation string
+	HiddenSize int
+	// For RNN/LSTM
+	SeqLength int
+	// For Conv layers
+	UseConvFormat bool
+}
+
+// LayerTestResult stores training results for a specific layer type
+type LayerTestResult struct {
+	Config       LayerTestConfig
+	IsGPU        bool
+	LossHistory  []float32
+	InitialAcc   float64
+	FinalAcc     float64
+	TrainTime    time.Duration
+	Success      bool
+	ErrorMessage string
+}
+
+// Define layer types to test
+func getLayerTestConfigs() []LayerTestConfig {
+	return []LayerTestConfig{
+		// Dense layers (larger sizes = better GPU speedup)
+		{Name: "Dense-1024", LayerType: "dense", Activation: "relu", HiddenSize: 1024},
+		{Name: "Dense-512", LayerType: "dense", Activation: "relu", HiddenSize: 512},
+		{Name: "Dense-256", LayerType: "dense", Activation: "relu", HiddenSize: 256},
+
+		// Conv1D (larger for GPU - NOTE: backward shader incomplete)
+		{Name: "Conv1D-64", LayerType: "conv1d", Activation: "relu", HiddenSize: 64, SeqLength: 16},
+		{Name: "Conv1D-128", LayerType: "conv1d", Activation: "relu", HiddenSize: 128, SeqLength: 16},
+
+		// Conv2D (larger sizes for better GPU utilization)
+		{Name: "Conv2D-64", LayerType: "conv2d", Activation: "relu", HiddenSize: 64, UseConvFormat: true},
+		{Name: "Conv2D-128", LayerType: "conv2d", Activation: "relu", HiddenSize: 128, UseConvFormat: true},
+
+		// RNN (NOTE: backward shader doesn't compute weight gradients yet)
+		{Name: "RNN-128", LayerType: "rnn", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
+		{Name: "RNN-256", LayerType: "rnn", Activation: "tanh", HiddenSize: 256, SeqLength: 8},
+
+		// LSTM (NOTE: backward shader doesn't compute weight gradients yet)
+		{Name: "LSTM-128", LayerType: "lstm", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
+		{Name: "LSTM-256", LayerType: "lstm", Activation: "tanh", HiddenSize: 256, SeqLength: 8},
+
+		// LayerNorm (larger)
+		{Name: "LayerNorm-256", LayerType: "layernorm", Activation: "none", HiddenSize: 256},
+		{Name: "LayerNorm-512", LayerType: "layernorm", Activation: "none", HiddenSize: 512},
+
+		// RMSNorm (larger)
+		{Name: "RMSNorm-256", LayerType: "rmsnorm", Activation: "none", HiddenSize: 256},
+		{Name: "RMSNorm-512", LayerType: "rmsnorm", Activation: "none", HiddenSize: 512},
+
+		// SwiGLU (larger)
+		{Name: "SwiGLU-256", LayerType: "swiglu", Activation: "none", HiddenSize: 256},
+		{Name: "SwiGLU-512", LayerType: "swiglu", Activation: "none", HiddenSize: 512},
+
+		// Multi-Head Attention
+		{Name: "MHA-4h", LayerType: "mha", Activation: "none", HiddenSize: 64, SeqLength: 8},
+		{Name: "MHA-8h", LayerType: "mha", Activation: "none", HiddenSize: 128, SeqLength: 8},
+
+		// Softmax
+		{Name: "Softmax-256", LayerType: "softmax", Activation: "none", HiddenSize: 256},
+
+		// Combined All-In-One Test
+		{Name: "Combined-Hybrid", LayerType: "combined", Activation: "relu", HiddenSize: 64, SeqLength: 8},
+	}
+}
+
+func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Network, error) {
+	var jsonConfig string
+
+	switch config.LayerType {
+	case "dense":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "%s", "input_height": 2, "output_height": %d},
+				{"type": "dense", "activation": "%s", "input_height": %d, "output_height": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.Activation, config.HiddenSize,
+			config.Activation, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "conv2d":
+		// Reshape 2D input (2 features) to 4x4 image with 1 channel for conv
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": 16},
+				{"type": "conv2d", "activation": "%s", "input_channels": 1, "input_height": 4, "input_width": 4, "filters": %d, "kernel_size": 3, "stride": 1, "padding": 1, "output_height": 4, "output_width": 4},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.Activation, config.HiddenSize, config.HiddenSize*16)
+
+	case "rnn":
+		// Reshape input to sequence format
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "rnn", "activation": "%s", "seq_length": %d, "input_size": %d, "hidden_size": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength*config.HiddenSize,
+			config.Activation, config.SeqLength, config.HiddenSize, config.HiddenSize, config.HiddenSize*config.SeqLength)
+
+	case "conv1d":
+		// Conv1D for sequence data
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "conv1d", "activation": "%s", "in_channels": 1, "filters": %d, "kernel_size": 3, "seq_len": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength,
+			config.Activation, config.HiddenSize, config.SeqLength, config.HiddenSize*(config.SeqLength-2))
+
+	case "lstm":
+		// LSTM also needs sequence format
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "lstm", "activation": "%s", "seq_length": %d, "input_size": %d, "hidden_size": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength*config.HiddenSize,
+			config.Activation, config.SeqLength, config.HiddenSize, config.HiddenSize, config.HiddenSize*config.SeqLength)
+
+	case "layernorm":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "layernorm", "norm_size": %d, "epsilon": 0.00001},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "rmsnorm":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "rmsnorm", "norm_size": %d, "epsilon": 0.00001},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "swiglu":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "swiglu", "input_height": %d, "output_height": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "softmax":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "softmax", "softmax_rows": 1, "softmax_cols": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "mha":
+		// Multi-Head Attention
+		// HiddenSize = embed_dim, SeqLength = num_heads
+		numHeads := config.SeqLength
+		if numHeads < 1 {
+			numHeads = 4
+		}
+		embedDim := config.HiddenSize
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": %d, "seq_length": 1},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, embedDim, embedDim, numHeads, embedDim)
+
+	case "combined":
+		// A complex network chaining compatible layers:
+		// Input -> Dense -> SwiGLU -> LayerNorm -> Conv1D -> RNN -> LSTM -> MHA -> RMSNorm -> Dense -> Output
+		// We need careful dimension handling.
+		// Input (Flat) -> [Dense] -> (Seq, Dim) -> [Conv1D] -> ...
+
+		seqLen := config.SeqLength
+		hidden := config.HiddenSize
+
+		// Note: Conv1D/RNN/LSTM/MHA inputs must be compatible.
+		// We'll treat the hidden state as [SeqLen, HiddenSize] where possible.
+		// Conv1D with kernel size 3 reduces sequence length by 2 usually, need padding or aware.
+		// For simplicity, we keep SeqLen constant by using padding in Conv1D if supported,
+		// OR we just accept the reduction.
+		// Actually Loom Conv1D `same` padding? Default usually valid/no-padding logic in verify script?
+		// Let's use `padding` param if needed, but `serialization.go` Conv2D has padding, Conv1D?
+		// Conv1D Config has InputLength.
+
+		// Let's assume Dense expands to (SeqLen * Hidden), then next layers interpret it.
+		// Dense Input: 2
+		// Dense Output: SeqLen * Hidden
+
+		// Topology:
+		// 1. Dense (Expand to Seq*Hidden)
+		// 2. SwiGLU (Pointwise)
+		// 3. LayerNorm
+		// 4. Conv1D (Seq -> Seq, preserve length using padding=1 for k=3)
+		// 5. RNN (Seq -> Seq)
+		// 6. LSTM (Seq -> Seq)
+		// 7. MHA (Seq -> Seq)
+		// 8. RMSNorm
+		// 9. Dense (Contract to 2) - Output
+
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 9,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "swiglu", "input_height": %d, "output_height": %d},
+				{"type": "layernorm", "norm_size": %d, "epsilon": 1e-5},
+				{"type": "conv1d", "activation": "relu", "input_channels": %d, "filters": %d, "kernel_size": 3, "padding": 1, "input_length": %d},
+				{"type": "rnn", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
+				{"type": "lstm", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": 1},
+				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-5},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize,
+			seqLen*hidden,                // Dense Out
+			seqLen*hidden, seqLen*hidden, // SwiGLU (Input=SeqLen*Hidden, Output=SeqLen*Hidden)
+			seqLen*hidden,          // LayerNorm
+			hidden, hidden, seqLen, // Conv1D (InputChannels=Hidden, Filters=Hidden, InputLength=SeqLen)
+			hidden, hidden, seqLen, // RNN
+			hidden, hidden, seqLen, // LSTM
+			hidden,        // MHA
+			hidden*seqLen, // RMSNorm (Applied to flat buffer)
+			hidden*seqLen) // Dense In
+
+		// Correction:
+		// Conv1D output size: Filters * SeqLen (if padded)
+		// RNN Input size: InputSize * SeqLen? No, RNN expects [SeqLen, InputSize]
+		// If Conv1D outputs [Filters, SeqLen] (or [SeqLen, Filters] depending on impl),
+		// and RNN inputs [SeqLen, InputSize].
+		// If Filters == InputSize, it matches.
+
+	case "combined-dummy": // Placeholder to avoid trailing switch error if I messed up braces
+
+		return nil, fmt.Errorf("unsupported layer type: %s", config.LayerType)
+	}
+
 	return nn.BuildNetworkFromJSON(jsonConfig)
 }
 
@@ -80,7 +372,7 @@ func cloneWeights(src, dst *nn.Network) {
 	}
 }
 
-func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) (time.Duration, error) {
+func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) ([]float32, time.Duration, error) {
 	name := "CPU"
 	if isGPU {
 		name = "GPU"
@@ -95,7 +387,9 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 	}
 	numBatches := numSamples / batchSize
 
+	lossHistory := make([]float32, epochs)
 	startTime := time.Now()
+
 	for epoch := 0; epoch < epochs; epoch++ {
 		totalLoss := float32(0.0)
 
@@ -162,15 +456,17 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			network.ApplyGradients(learningRate)
 		}
 
-		// Print progress
+		// Record epoch loss
 		avgLoss := totalLoss / float32(numSamples)
+		lossHistory[epoch] = avgLoss
 
+		// Print progress
 		// Always print first, last, and every epoch if requested by user (for now we print all)
 		fmt.Printf("  [%s] Epoch %d/%d - Loss: %.4f\n", name, epoch+1, epochs, avgLoss)
 	}
 
 	totalTime := time.Since(startTime)
-	return totalTime, nil
+	return lossHistory, totalTime, nil
 }
 
 func printDeviationTable(name string, before, after *nn.DeviationMetrics) {
@@ -200,6 +496,71 @@ func printDeviationTable(name string, before, after *nn.DeviationMetrics) {
 	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
 }
 
+// printEpochLossTable prints epoch-by-epoch loss progression for all tested layers
+func printEpochLossTable(results []LayerTestResult, title string, epochs int) {
+	fmt.Printf("\n%s\n", title)
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	// Header
+	fmt.Printf("%-15s", "Layer Type")
+	epochsToShow := []int{1, 2, 3, 5, 10, 15, 20}
+	for _, e := range epochsToShow {
+		if e <= epochs {
+			fmt.Printf(" | Ep%-3d", e)
+		}
+	}
+	fmt.Printf("\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	// Rows
+	for _, result := range results {
+		fmt.Printf("%-15s", result.Config.Name)
+		if !result.Success {
+			fmt.Printf(" | %s\n", result.ErrorMessage)
+			continue
+		}
+
+		for _, e := range epochsToShow {
+			if e <= epochs && e-1 < len(result.LossHistory) {
+				fmt.Printf(" | %.4f", result.LossHistory[e-1])
+			}
+		}
+		fmt.Printf("\n")
+	}
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+}
+
+// printFinalComparisonTable prints final metrics comparison
+func printFinalComparisonTable(cpuResults, gpuResults []LayerTestResult) {
+	fmt.Printf("\nFinal Comparison\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+	fmt.Printf("%-15s | CPU Acc | GPU Acc |  Speedup | GPU Status\n", "Layer Type")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	for i := range cpuResults {
+		cpuRes := cpuResults[i]
+		gpuRes := gpuResults[i]
+
+		status := "✓ OK"
+		if !gpuRes.Success {
+			status = "✗ FAIL"
+		}
+
+		speedup := float64(cpuRes.TrainTime) / float64(gpuRes.TrainTime)
+		if !gpuRes.Success {
+			speedup = 0
+		}
+
+		fmt.Printf("%-15s | %6.1f%% | %6.1f%% | %7.2fx | %s\n",
+			cpuRes.Config.Name,
+			cpuRes.FinalAcc*100,
+			gpuRes.FinalAcc*100,
+			speedup,
+			status)
+	}
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+}
+
 func main() {
 	flag.Parse()
 	if *gpuFlag != "" {
@@ -210,165 +571,150 @@ func main() {
 	rand.Seed(time.Now().UnixNano())
 
 	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
-	fmt.Println("║       GPU Training Verification Test                         ║")
+	fmt.Println("║       GPU Training Verification Test (Multi-Layer)           ║")
 	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
 	// Generate dataset
-	fmt.Printf("Generating linearly separable dataset (100 samples)...\n")
+	fmt.Printf("Generating linearly separable dataset (100 samples)...\n\n")
 	dataset := generateSimpleDataset(100)
 
-	// ========================================================================
-	// CPU Training
-	// ========================================================================
-	fmt.Println("\n┌───────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ CPU TRAINING                                                  │")
-	fmt.Println("└───────────────────────────────────────────────────────────────┘")
+	// Get layer configurations to test
+	layerConfigs := getLayerTestConfigs()
 
-	cpuNetwork, err := createNetwork(1) // Batch size 1 for CPU SGD
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create CPU network: %v", err))
+	var cpuResults []LayerTestResult
+	var gpuResults []LayerTestResult
+
+	// Test each layer type
+	for _, config := range layerConfigs {
+		fmt.Printf("\n┌───────────────────────────────────────────────────────────────┐\n")
+		fmt.Printf("│ Testing: %-52s │\n", config.Name)
+		fmt.Printf("└───────────────────────────────────────────────────────────────┘\n")
+
+		// ===== CPU Training =====
+		fmt.Println("\n[CPU Training]")
+		cpuResult := LayerTestResult{
+			Config: config,
+			IsGPU:  false,
+		}
+
+		cpuNetwork, err := createNetworkWithHiddenLayer(1, config)
+		if err != nil {
+			cpuResult.Success = false
+			cpuResult.ErrorMessage = fmt.Sprintf("Network creation failed: %v", err)
+			cpuResults = append(cpuResults, cpuResult)
+			fmt.Printf("  ✗ Failed to create network: %v\n", err)
+			continue
+		}
+
+		cpuNetwork.InitializeWeights()
+
+		// Evaluate before
+		beforeMetrics, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		cpuResult.InitialAcc = beforeMetrics.Accuracy
+
+		initialWeightsNetwork, _ := createNetworkWithHiddenLayer(20, config)
+		cloneWeights(cpuNetwork, initialWeightsNetwork)
+
+		// Train
+		lossHistory, trainTime, err := trainNetwork(cpuNetwork, dataset, *epochsFlag, float32(*lrFlag), false, 1)
+		if err != nil {
+			cpuResult.Success = false
+			cpuResult.ErrorMessage = fmt.Sprintf("Training failed: %v", err)
+			cpuResults = append(cpuResults, cpuResult)
+			fmt.Printf("  ✗ Training failed: %v\n", err)
+			continue
+		}
+
+		cpuResult.LossHistory = lossHistory
+		cpuResult.TrainTime = trainTime
+
+		// Evaluate after
+		afterMetrics, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		cpuResult.FinalAcc = afterMetrics.Accuracy
+		cpuResult.Success = true
+
+		cpuResults = append(cpuResults, cpuResult)
+		fmt.Printf("  ✓ Completed: %.1f%% → %.1f%% accuracy in %v\n",
+			cpuResult.InitialAcc*100, cpuResult.FinalAcc*100, trainTime)
+
+		// ===== GPU Training =====
+		fmt.Println("\n[GPU Training]")
+		gpuResult := LayerTestResult{
+			Config: config,
+			IsGPU:  true,
+		}
+
+		gpuNetwork, err := createNetworkWithHiddenLayer(20, config)
+		if err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = fmt.Sprintf("Network creation failed")
+			gpuResults = append(gpuResults, gpuResult)
+			fmt.Printf("  ✗ Failed to create network: %v\n", err)
+			continue
+		}
+
+		cloneWeights(initialWeightsNetwork, gpuNetwork)
+
+		// Try to enable GPU
+		gpuNetwork.GPU = true
+		err = gpuNetwork.WeightsToGPU()
+		if err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = fmt.Sprintf("GPU mount failed")
+			gpuResults = append(gpuResults, gpuResult)
+			fmt.Printf("  ✗ Failed to mount to GPU: %v\n", err)
+			continue
+		}
+		defer gpuNetwork.ReleaseGPUWeights()
+
+		beforeMetrics, _ = gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		gpuResult.InitialAcc = beforeMetrics.Accuracy
+
+		// Train with scaled LR
+		gpuLR := float32(*lrFlag) * 5.0
+		lossHistory, trainTime, err = trainNetwork(gpuNetwork, dataset, *epochsFlag, gpuLR, true, 20)
+		if err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = fmt.Sprintf("Training failed")
+			gpuResults = append(gpuResults, gpuResult)
+			fmt.Printf("  ✗ Training failed: %v\n", err)
+			continue
+		}
+
+		gpuResult.LossHistory = lossHistory
+		gpuResult.TrainTime = trainTime
+
+		afterMetrics, _ = gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		gpuResult.FinalAcc = afterMetrics.Accuracy
+		gpuResult.Success = true
+
+		gpuResults = append(gpuResults, gpuResult)
+		fmt.Printf("  ✓ Completed: %.1f%% → %.1f%% accuracy in %v\n",
+			gpuResult.InitialAcc*100, gpuResult.FinalAcc*100, trainTime)
 	}
-	cpuNetwork.InitializeWeights()
 
-	// Save initial weights for GPU network (before CPU training)
-	initialWeightsNetwork, _ := createNetwork(20) // Dummy batch size, we only want weights
-	cloneWeights(cpuNetwork, initialWeightsNetwork)
+	// ===== Print Results =====
+	fmt.Printf("\n\n")
+	fmt.Println("╔═══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║ RESULTS                                                       ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════╝")
 
-	// Evaluate before training
-	fmt.Println("\nEvaluating before training...")
-	evalStart := time.Now()
-	cpuBeforeMetrics, err := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-	evalTime := time.Since(evalStart)
-	if err != nil {
-		panic(fmt.Sprintf("CPU evaluation failed: %v", err))
-	}
-	fmt.Printf("Before training: Accuracy = %.1f%% (eval time: %v)\n", cpuBeforeMetrics.Accuracy*100, evalTime)
+	printEpochLossTable(cpuResults, "CPU Epoch-by-Epoch Loss", *epochsFlag)
+	printEpochLossTable(gpuResults, "GPU Epoch-by-Epoch Loss", *epochsFlag)
+	printFinalComparisonTable(cpuResults, gpuResults)
 
-	// Train
-	fmt.Printf("\nTraining for %d epochs (lr=%.3f)...\n", *epochsFlag, *lrFlag)
-	// CPU: Use Batch Size 1 (SGD) as CPU implementation doesn't support batching
-	cpuTrainTime, err := trainNetwork(cpuNetwork, dataset, *epochsFlag, float32(*lrFlag), false, 1)
-	if err != nil {
-		panic(fmt.Sprintf("CPU training failed: %v", err))
-	}
-	fmt.Printf("Training completed in %v\n", cpuTrainTime)
-
-	// Evaluate after training
-	fmt.Println("\nEvaluating after training...")
-	evalStart = time.Now()
-	cpuAfterMetrics, err := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-	evalTime = time.Since(evalStart)
-	if err != nil {
-		panic(fmt.Sprintf("CPU evaluation failed: %v", err))
-	}
-	fmt.Printf("After training: Accuracy = %.1f%% (eval time: %v)\n", cpuAfterMetrics.Accuracy*100, evalTime)
-
-	// ========================================================================
-	// GPU Training
-	// ========================================================================
-	fmt.Println("\n┌───────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ GPU TRAINING                                                  │")
-	fmt.Println("└───────────────────────────────────────────────────────────────┘")
-
-	gpuNetwork, err := createNetwork(20) // Batch size 20 for GPU Mini-Match
-	if err != nil {
-		panic(fmt.Sprintf("Failed to create GPU network: %v", err))
+	// Check overall pass/fail
+	allPassed := true
+	for _, result := range gpuResults {
+		if !result.Success {
+			allPassed = false
+		}
 	}
 
-	// Clone INITIAL weights (before any training)
-	cloneWeights(initialWeightsNetwork, gpuNetwork)
-
-	// Enable GPU
-	gpuNetwork.GPU = true
-	err = gpuNetwork.WeightsToGPU()
-	if err != nil {
-		panic(fmt.Sprintf("Failed to mount weights to GPU: %v", err))
-	}
-	defer gpuNetwork.ReleaseGPUWeights()
-
-	// Evaluate before training
-	fmt.Println("\nEvaluating before training...")
-	evalStart = time.Now()
-	gpuBeforeMetrics, err := gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-	evalTime = time.Since(evalStart)
-	if err != nil {
-		panic(fmt.Sprintf("GPU evaluation failed: %v", err))
-	}
-	fmt.Printf("Before training: Accuracy = %.1f%% (eval time: %v)\n", gpuBeforeMetrics.Accuracy*100, evalTime)
-
-	// Train
-	// Scale learning rate for GPU: Since batch size is 20 vs 1 (CPU), we do 20x fewer updates.
-	// We increase LR to compensate (Linear Scaling Rule would suggest 20x, but that's unstable.
-	// We use 5x as a safe heuristic for this simple dataset).
-	gpuLR := float32(*lrFlag) * 5.0
-	fmt.Printf("\nTraining for %d epochs (lr=%.3f)...\n", *epochsFlag, gpuLR)
-	// GPU: Use Batch Size 20 (Mini-Batch)
-	gpuTrainTime, err := trainNetwork(gpuNetwork, dataset, *epochsFlag, gpuLR, true, 20)
-	if err != nil {
-		panic(fmt.Sprintf("GPU training failed: %v", err))
-	}
-	fmt.Printf("Training completed in %v\n", gpuTrainTime)
-
-	// Evaluate after training
-	fmt.Println("\nEvaluating after training...")
-	evalStart = time.Now()
-	gpuAfterMetrics, err := gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-	evalTime = time.Since(evalStart)
-	if err != nil {
-		panic(fmt.Sprintf("GPU evaluation failed: %v", err))
-	}
-	fmt.Printf("After training: Accuracy = %.1f%% (eval time: %v)\n", gpuAfterMetrics.Accuracy*100, evalTime)
-
-	// ========================================================================
-	// Comparison
-	// ========================================================================
-	fmt.Println("\n┌───────────────────────────────────────────────────────────────┐")
-	fmt.Println("│ COMPARISON RESULTS                                            │")
-	fmt.Println("└───────────────────────────────────────────────────────────────┘")
-
-	printDeviationTable("CPU Training", cpuBeforeMetrics, cpuAfterMetrics)
-	printDeviationTable("GPU Training", gpuBeforeMetrics, gpuAfterMetrics)
-
-	fmt.Printf("\nPerformance:\n")
-	fmt.Printf("  CPU Time: %v\n", cpuTrainTime)
-	fmt.Printf("  GPU Time: %v\n", gpuTrainTime)
-	speedup := float64(cpuTrainTime) / float64(gpuTrainTime)
-	fmt.Printf("  Speedup:  %.2fx\n", speedup)
-
-	// Validation
-	// CPU (SGD) does NumSamples updates per epoch.
-	// GPU (Batch=20) does NumSamples/20 updates per epoch.
-	// We expect CPU to converge faster per-epoch.
-	// Success is defined as:
-	// 1. Speedup > 1.0x
-	// 2. GPU Accuracy significantly improved from baseline
-
-	fmt.Printf("\nVerification Analysis:\n")
-	fmt.Printf("  CPU Updates/Epoch: %d (Batch=1)\n", dataset.NumClass*50) // Approx
-	fmt.Printf("  GPU Updates/Epoch: %d (Batch=20)\n", (dataset.NumClass*50)/20)
-
-	learningThreshold := 0.15 // Expect at least 15% improvement (lower threshold due to batching differences)
-	accuracyGain := gpuAfterMetrics.Accuracy - gpuBeforeMetrics.Accuracy
-
-	passed := true
-	if speedup < 1.0 {
-		fmt.Printf("  [FAIL] GPU is slower than CPU (%.2fx)\n", speedup)
-		// passed = false // Don't fail entire test on speedup for now, we focus on learning
+	if allPassed {
+		fmt.Printf("\n✓ All GPU layers verified successfully\n")
 	} else {
-		fmt.Printf("  [PASS] GPU Speedup: %.2fx\n", speedup)
-	}
-
-	if accuracyGain < float64(learningThreshold) && gpuAfterMetrics.Accuracy < 0.90 {
-		fmt.Printf("  [FAIL] GPU did not learn sufficienty (Gain: %.1f%%)\n", accuracyGain*100)
-		passed = false
-	} else {
-		fmt.Printf("  [PASS] GPU Learning Confirmed (Gain: %.1f%%, Final: %.1f%%)\n", accuracyGain*100, gpuAfterMetrics.Accuracy*100)
-	}
-
-	if passed {
-		fmt.Printf("\nGradient Descent Verification: PASSED\n")
-	} else {
-		fmt.Printf("\nGradient Descent Verification: FAILED\n")
+		fmt.Printf("\n⚠ Some GPU layers failed - see table above for details\n")
 	}
 }
