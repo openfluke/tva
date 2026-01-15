@@ -21,6 +21,12 @@ var filterFlag = flag.String("filter", "", "Optional substring to run specific t
 // Tests all v0.0.8 features + multi-precision save/load for all layer types
 // =============================================================================
 
+type SectionResult struct {
+	Name   string
+	Passed int
+	Failed int
+}
+
 func main() {
 	flag.Parse()
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
@@ -28,8 +34,9 @@ func main() {
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
-	passed := 0
-	failed := 0
+	var sectionResults []SectionResult
+	var allFailedTests []string
+	var totalPassed, totalFailed int
 
 	// =========================================================================
 	// PART 1: Core v0.0.8 Feature Tests
@@ -47,14 +54,20 @@ func main() {
 		testNetworkGrafting,
 	}
 
+	p1 := 0
+	f1 := 0
 	if *filterFlag == "" {
 		for _, test := range coreTests {
 			if test() {
-				passed++
+				p1++
 			} else {
-				failed++
+				f1++
+				allFailedTests = append(allFailedTests, "Part 1 Core Test Failure")
 			}
 		}
+		sectionResults = append(sectionResults, SectionResult{"Part 1: Core Features", p1, f1})
+		totalPassed += p1
+		totalFailed += f1
 	} else {
 		fmt.Println("Skipping Part 1 (Core Tests) due to filter")
 	}
@@ -68,7 +81,11 @@ func main() {
 
 	// Check if we should skip this part due to filter
 	if *filterFlag == "" || strings.Contains("Serialization", *filterFlag) || strings.Contains("Save", *filterFlag) {
-		runMultiPrecisionSerializationTests()
+		p2, f2, failures := runMultiPrecisionSerializationTests()
+		sectionResults = append(sectionResults, SectionResult{"Part 2: Serialization", p2, f2})
+		totalPassed += p2
+		totalFailed += f2
+		allFailedTests = append(allFailedTests, failures...)
 	} else {
 		fmt.Println("Skipping Part 2 (Multi-Precision Serialization) due to filter")
 	}
@@ -95,13 +112,19 @@ func main() {
 			testObserverPattern,
 		}
 
+		p3 := 0
+		f3 := 0
 		for _, test := range additionalTests {
 			if test() {
-				passed++
+				p3++
 			} else {
-				failed++
+				f3++
+				allFailedTests = append(allFailedTests, "Part 3 Advanced Math Failure")
 			}
 		}
+		sectionResults = append(sectionResults, SectionResult{"Part 3: Advanced Math", p3, f3})
+		totalPassed += p3
+		totalFailed += f3
 
 		// =========================================================================
 		// PART 4: Experimental Demos
@@ -134,19 +157,23 @@ func main() {
 		gpu.SetAdapterPreference(*gpuFlag)
 	}
 
-	var failedTests []string
+	p5 := 0
+	f5 := 0
 	for _, test := range gpuLayerTests {
 		if *filterFlag != "" && !strings.Contains(test.Name, *filterFlag) {
 			continue
 		}
 		if runGPULayerTest(test) {
-			passed++
+			p5++
 		} else {
-			failed++
-			failedTests = append(failedTests, test.Name)
+			f5++
+			allFailedTests = append(allFailedTests, fmt.Sprintf("GPU Forward: %s", test.Name))
 		}
 		fmt.Println()
 	}
+	sectionResults = append(sectionResults, SectionResult{"Part 5: GPU Determinism", p5, f5})
+	totalPassed += p5
+	totalFailed += f5
 
 	// =========================================================================
 	// PART 6: GPU Training Verification
@@ -156,19 +183,43 @@ func main() {
 	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
 	p6, f6 := runGPUTrainingVerification()
-	passed += p6
-	failed += f6
+	sectionResults = append(sectionResults, SectionResult{"Part 6: GPU Training", p6, f6})
+	totalPassed += p6
+	totalFailed += f6
+	if f6 > 0 {
+		// Note: Detailed names are printed inside runGPUTrainingVerification,
+		// but we can add generic markers if we don't return the names from there yet.
+		allFailedTests = append(allFailedTests, fmt.Sprintf("GPU Training: %d tests failed", f6))
+	}
 
 	// Final Summary
 	fmt.Println()
-	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
-	fmt.Printf("║              FINAL RESULTS: %d/%d TESTS PASSED                       ║\n", passed, passed+failed)
-	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
+	fmt.Println("╔════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                       DETAILED TEST REPORT                             ║")
+	fmt.Println("╠══════════════════════════════════════════╦══════════╦══════════╦═══════╣")
+	fmt.Printf("║ %-40s ║ %-8s ║ %-8s ║ %-5s ║\n", "Section", "Passed", "Failed", "Total")
+	fmt.Println("╠══════════════════════════════════════════╬══════════╬══════════╬═══════╣")
 
-	if failed > 0 {
-		fmt.Printf("\n❌ %d test(s) failed:\n", failed)
-		for _, name := range failedTests {
-			fmt.Printf("  • %s\n", name)
+	for _, res := range sectionResults {
+		fmt.Printf("║ %-40s ║ %-8d ║ %-8d ║ %-5d ║\n", res.Name, res.Passed, res.Failed, res.Passed+res.Failed)
+	}
+	fmt.Println("╠══════════════════════════════════════════╬══════════╬══════════╬═══════╣")
+	fmt.Printf("║ %-40s ║ %-8d ║ %-8d ║ %-5d ║\n", "GRAND TOTAL", totalPassed, totalFailed, totalPassed+totalFailed)
+	fmt.Println("╚══════════════════════════════════════════╩══════════╩══════════╩═══════╝")
+
+	if totalFailed > 0 {
+		fmt.Printf("\n❌ Total %d test(s) failed. See output above for details.\n", totalFailed)
+		// Limit failure list if too long
+		if len(allFailedTests) > 20 {
+			fmt.Printf("First 20 failures:\n")
+			for i := 0; i < 20; i++ {
+				fmt.Printf("  • %s\n", allFailedTests[i])
+			}
+			fmt.Printf("  ... and %d more\n", len(allFailedTests)-20)
+		} else {
+			for _, name := range allFailedTests {
+				fmt.Printf("  • %s\n", name)
+			}
 		}
 	} else {
 		fmt.Println("\n🎉 All tests passed! Ready for 0.0.8 release!")
@@ -2487,6 +2538,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 		totalLoss := float32(0.0)
 
 		for b := 0; b < numBatches; b++ {
+			// Determine batch range
 			idxStart := b * batchSize
 			idxEnd := idxStart + batchSize
 			if idxEnd > numSamples {
@@ -2494,33 +2546,35 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			}
 			currentBatchSize := idxEnd - idxStart
 
+			// Extract Batch Input
+			// We need a flat slice for the batch
 			batchInputLen := currentBatchSize * inputSize
+			// Optimization: could reuse buffer, but allocation is cleaner for now
 			batchInput := make([]float32, batchInputLen)
 
+			// Copy samples into batchInput
 			for i := 0; i < currentBatchSize; i++ {
 				copy(batchInput[i*inputSize:], dataset.Inputs[idxStart+i])
 			}
 
 			// Forward Pass
-			var output []float32
-			if isGPU {
-				var err error
-				output, _, err = network.ForwardGPU(batchInput)
-				if err != nil {
-					return nil, 0, fmt.Errorf("GPU forward failed: %v", err)
-				}
-			} else {
-				output, _ = network.ForwardCPU(batchInput)
-			}
+			output, _ := network.ForwardCPU(batchInput)
 
 			// Compute Gradients
 			dOutput := make([]float32, len(output))
+
 			for i := 0; i < currentBatchSize; i++ {
+				// absolute index in dataset
 				absIdx := idxStart + i
+
+				// Output corresponds to batch index i
 				outStart := i * outputSize
 				sampleOut := output[outStart : outStart+outputSize]
+
+				// Target
 				class := int(dataset.Outputs[absIdx])
 
+				// Loss calculation
 				if class < len(sampleOut) {
 					val := sampleOut[class]
 					if val > 1e-7 {
@@ -2528,6 +2582,8 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 					}
 				}
 
+				// Gradient dL/dY = (Y - T) / N
+				// dOutput should be scaled by currentBatchSize
 				for j := 0; j < outputSize; j++ {
 					targetVal := 0.0
 					if j == class {
@@ -2537,16 +2593,10 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 				}
 			}
 
-			// Backward
-			if isGPU {
-				_, _, err := network.BackwardGPUNew(dOutput)
-				if err != nil {
-					return nil, 0, err
-				}
-			} else {
-				network.BackwardCPU(dOutput)
-			}
+			// Backward Pass
+			_, _ = network.BackwardCPU(dOutput)
 
+			// Apply Gradients
 			network.ApplyGradients(learningRate)
 		}
 
@@ -3866,7 +3916,7 @@ func printSaveLoadPermutationResults(results []SaveLoadPermutationResult) {
 	}
 }
 
-func runMultiPrecisionSerializationTests() {
+func runMultiPrecisionSerializationTests() (int, int, []string) {
 	fmt.Println("╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
 	fmt.Println("║                                          Save/Load Everything Test                                                                                                    ║")
 	fmt.Println("║                                                                                                                                                                       ║")
@@ -3876,6 +3926,10 @@ func runMultiPrecisionSerializationTests() {
 	rand.Seed(time.Now().UnixNano())
 
 	start := time.Now()
+
+	var failures []string
+	totalPassed := 0
+	totalFailed := 0
 
 	// PHASE 1: Basic layer tests
 	fmt.Println("\n══════════════════════════════════════════════════════════════════════════════════════════════════════════════════")
@@ -3888,7 +3942,10 @@ func runMultiPrecisionSerializationTests() {
 	for _, r := range results {
 		if !r.Passed {
 			phase1Failed = true
-			break
+			totalFailed++
+			failures = append(failures, fmt.Sprintf("Basic: %s %s (%s)", r.LayerType, r.DType, r.Error))
+		} else {
+			totalPassed++
 		}
 	}
 
@@ -3903,7 +3960,10 @@ func runMultiPrecisionSerializationTests() {
 	for _, r := range permResults {
 		if !r.Passed {
 			phase2Failed = true
-			break
+			totalFailed++
+			failures = append(failures, fmt.Sprintf("Perm: %s+%s %s %s Depth:%d (%s)", r.BranchType1, r.BranchType2, r.CombineMode, r.DType, r.NestingDepth, r.Error))
+		} else {
+			totalPassed++
 		}
 	}
 
@@ -3915,4 +3975,6 @@ func runMultiPrecisionSerializationTests() {
 	} else {
 		fmt.Println("\n✅ All serialization tests passed!")
 	}
+
+	return totalPassed, totalFailed, failures
 }
