@@ -34,12 +34,22 @@ func generateSimpleDataset(numSamples int) *Dataset {
 	outputs := make([]float64, numSamples)
 
 	for i := 0; i < numSamples; i++ {
-		x0 := rand.Float32()
-		x1 := rand.Float32()
-		inputs[i] = []float32{x0, x1}
+		// For MHA layers: generate sequential data (4 time steps, varying dims)
+		// For other layers: generate simple 2D data
+		// We'll use a simple sequential sum task:
+		// seq = [v1, v2, v3, v4], class = (v1+v2+v3+v4 > 0)
 
-		// Simple rule: if x[0] > 0.5, class 1, else class 0
-		if x0 > 0.5 {
+		val1 := rand.Float32()*2 - 1
+		val2 := rand.Float32()*2 - 1
+		val3 := rand.Float32()*2 - 1
+		val4 := rand.Float32()*2 - 1
+
+		// For MHA (seq_len=4, varies by embed_dim), store sequential data
+		// For Dense/etc (input=2), just use first 2 values
+		inputs[i] = []float32{val1, val2, val3, val4}
+
+		// Classification: sum > 0
+		if val1+val2+val3+val4 > 0 {
 			outputs[i] = 1.0
 		} else {
 			outputs[i] = 0.0
@@ -264,25 +274,35 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
 
 	case "mha":
-		// Multi-Head Attention
-		// HiddenSize = embed_dim, SeqLength = num_heads
+		// Multi-Head Attention with seq_length=4
+		// Use reasonable embed_dim (128 or 256) instead of full HiddenSize to avoid massive networks
 		numHeads := config.SeqLength
 		if numHeads < 1 {
 			numHeads = 4
 		}
-		embedDim := config.HiddenSize
+		// Use smaller embed dimensions: 128 for MHA-640, 256 for MHA-1280
+		embedDim := 128
+		if config.HiddenSize >= 1280 {
+			embedDim = 256
+		}
+		seqLen := 4 // Fixed sequence length for attention
+		inputSize := seqLen * embedDim
+		hiddenSize := 256 // Buffer hidden layer size
+
 		jsonConfig = fmt.Sprintf(`{
 			"id": "training_verification_%s",
 			"batch_size": %d,
 			"grid_rows": 1,
 			"grid_cols": 1,
-			"layers_per_cell": 3,
+			"layers_per_cell": 5,
 			"layers": [
 				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
-				{"type": "multi_head_attention", "d_model": %d, "num_heads": %d, "seq_length": 1},
+				{"type": "dense", "activation": "relu", "input_height": %d, "output_height": %d},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": %d, "seq_length": %d},
+				{"type": "dense", "activation": "relu", "input_height": %d, "output_height": %d},
 				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
 			]
-		}`, config.Name, batchSize, embedDim, embedDim, numHeads, embedDim)
+		}`, config.Name, batchSize, hiddenSize, hiddenSize, inputSize, embedDim, numHeads, seqLen, inputSize, hiddenSize, hiddenSize)
 
 	case "combined":
 		// A complex network chaining compatible layers:
@@ -330,7 +350,7 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 				{"type": "conv1d", "activation": "relu", "input_channels": %d, "filters": %d, "kernel_size": 3, "padding": 1, "input_length": %d},
 				{"type": "rnn", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
 				{"type": "lstm", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
-				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": 1},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": 4},
 				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-5},
 				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
 			]
@@ -409,7 +429,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 	}
 
 	numSamples := len(dataset.Inputs)
-	inputSize := len(dataset.Inputs[0])
+	inputSize := 2 // All networks use input_height: 2, only use first 2 elements
 	outputSize := 2
 
 	if batchSize <= 0 {
