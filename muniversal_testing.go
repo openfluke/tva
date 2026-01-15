@@ -66,31 +66,11 @@ func main() {
 	fmt.Println("           PART 2: MULTI-PRECISION SAVE/LOAD FOR ALL LAYERS           ")
 	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 
-	dtypes := []string{"float32", "float64", "int32", "int16", "int8"}
-
-	layerTests := []struct {
-		name      string
-		inputSize int
-	}{
-		{"Dense", 8},
-		{"MHA", 64},
-		{"RNN", 16},
-		{"LSTM", 16},
-		{"LayerNorm", 16},
-		{"RMSNorm", 16},
-		{"SwiGLU", 32},
-		{"Conv2D", 16},
-		{"Parallel", 8},
-		{"Sequential", 8},
-		{"Softmax", 8},
-	}
-
-	for _, lt := range layerTests {
-		for _, dtype := range dtypes {
-			p, f := testLayerWithDType(lt.name, lt.inputSize, dtype)
-			passed += p
-			failed += f
-		}
+	// Check if we should skip this part due to filter
+	if *filterFlag == "" || strings.Contains("Serialization", *filterFlag) || strings.Contains("Save", *filterFlag) {
+		runMultiPrecisionSerializationTests()
+	} else {
+		fmt.Println("Skipping Part 2 (Multi-Precision Serialization) due to filter")
 	}
 
 	// =========================================================================
@@ -167,6 +147,17 @@ func main() {
 		}
 		fmt.Println()
 	}
+
+	// =========================================================================
+	// PART 6: GPU Training Verification
+	// =========================================================================
+	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
+	fmt.Println("              PART 6: GPU TRAINING VERIFICATION (Backward Pass)        ")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
+
+	p6, f6 := runGPUTrainingVerification()
+	passed += p6
+	failed += f6
 
 	// Final Summary
 	fmt.Println()
@@ -374,293 +365,6 @@ func testCorrelationAnalysis() bool {
 
 	fmt.Println("  ✅ PASSED: Correlation Analysis")
 	return true
-}
-
-// =============================================================================
-// JSON Network Templates (dtype will be injected)
-// =============================================================================
-
-func getJSONConfig(layerType, dtype string) string {
-	template := ""
-	switch layerType {
-	case "Dense":
-		template = `{
-			"id": "dense_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 8, "output_height": 64},
-				{"type": "dense", "activation": "tanh", "input_height": 64, "output_height": 32},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "MHA":
-		template = `{
-			"id": "mha_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 2,
-			"layers": [
-				{"type": "multi_head_attention", "d_model": 64, "num_heads": 8, "seq_length": 1},
-				{"type": "dense", "activation": "sigmoid", "input_height": 64, "output_height": 4}
-			]
-		}`
-	case "RNN":
-		template = `{
-			"id": "rnn_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 2,
-			"layers": [
-				{"type": "rnn", "input_size": 16, "hidden_size": 32, "activation": "tanh"},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "LSTM":
-		template = `{
-			"id": "lstm_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 2,
-			"layers": [
-				{"type": "lstm", "input_size": 16, "hidden_size": 32},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "LayerNorm":
-		template = `{
-			"id": "layernorm_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 16, "output_height": 32},
-				{"type": "layer_norm", "norm_size": 32, "epsilon": 1e-5},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "RMSNorm":
-		template = `{
-			"id": "rmsnorm_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 16, "output_height": 32},
-				{"type": "rms_norm", "norm_size": 32, "epsilon": 1e-5},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "SwiGLU":
-		template = `{
-			"id": "swiglu_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 32, "output_height": 64},
-				{"type": "swiglu", "input_height": 64, "output_height": 128},
-				{"type": "dense", "activation": "sigmoid", "input_height": 64, "output_height": 4}
-			]
-		}`
-	case "Conv2D":
-		template = `{
-			"id": "conv2d_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 2,
-			"layers": [
-				{"type": "conv2d", "input_channels": 1, "filters": 2, "kernel_size": 3, "stride": 1, "padding": 1, "input_height": 4, "input_width": 4, "activation": "leaky_relu"},
-				{"type": "dense", "activation": "sigmoid", "input_height": 32, "output_height": 4}
-			]
-		}`
-	case "Parallel":
-		template = `{
-			"id": "parallel_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 8, "output_height": 16},
-				{
-					"type": "parallel",
-					"combine_mode": "concat",
-					"branches": [
-						{"type": "dense", "activation": "tanh", "input_height": 16, "output_height": 8},
-						{"type": "dense", "activation": "sigmoid", "input_height": 16, "output_height": 8}
-					]
-				},
-				{"type": "dense", "activation": "sigmoid", "input_height": 16, "output_height": 4}
-			]
-		}`
-	case "Sequential":
-		template = `{
-			"id": "sequential_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 2,
-			"layers": [
-				{
-					"type": "sequential",
-					"branches": [
-						{"type": "dense", "activation": "leaky_relu", "input_height": 8, "output_height": 16},
-						{"type": "dense", "activation": "tanh", "input_height": 16, "output_height": 8}
-					]
-				},
-				{"type": "dense", "activation": "sigmoid", "input_height": 8, "output_height": 4}
-			]
-		}`
-	case "Softmax":
-		template = `{
-			"id": "softmax_test",
-			"dtype": "%s",
-			"batch_size": 1,
-			"grid_rows": 1,
-			"grid_cols": 1,
-			"layers_per_cell": 3,
-			"layers": [
-				{"type": "dense", "activation": "leaky_relu", "input_height": 8, "output_height": 16},
-				{"type": "dense", "activation": "leaky_relu", "input_height": 16, "output_height": 4},
-				{"type": "softmax", "softmax_variant": "standard", "temperature": 1.0}
-			]
-		}`
-	}
-	return fmt.Sprintf(template, dtype)
-}
-
-// =============================================================================
-// Test Runner with DType from JSON
-// =============================================================================
-
-func testLayerWithDType(layerName string, inputSize int, dtype string) (int, int) {
-	// Build network from JSON with dtype
-	jsonConfig := getJSONConfig(layerName, dtype)
-	net, configDType, err := nn.BuildNetworkFromJSONWithDType(jsonConfig)
-	if err != nil {
-		fmt.Printf("  ❌ %s/%s: Build failed: %v\n", layerName, dtype, err)
-		return 0, 1
-	}
-
-	// Verify dtype was parsed correctly
-	if configDType != dtype {
-		fmt.Printf("  ❌ %s/%s: DType mismatch (got %s)\n", layerName, dtype, configDType)
-		return 0, 1
-	}
-
-	// Create input
-	input := make([]float32, inputSize)
-	for i := range input {
-		input[i] = float32(i+1) * 0.1
-	}
-
-	// Reference output (float32 inference)
-	refOutput, _ := net.ForwardCPU(input)
-	if len(refOutput) == 0 {
-		fmt.Printf("  ❌ %s/%s: Forward pass failed\n", layerName, dtype)
-		return 0, 1
-	}
-
-	// Save with dtype from config
-	start := time.Now()
-	jsonData, err := net.SaveModelWithDType(layerName+"_test", configDType)
-	saveTime := time.Since(start).Seconds() * 1000
-	if err != nil {
-		fmt.Printf("  ❌ %s/%s: Save failed: %v\n", layerName, dtype, err)
-		return 0, 1
-	}
-
-	// Load back
-	start = time.Now()
-	loaded, loadedDType, err := nn.LoadModelWithDType(jsonData, layerName+"_test", configDType)
-	loadTime := time.Since(start).Seconds() * 1000
-	if err != nil {
-		fmt.Printf("  ❌ %s/%s: Load failed: %v\n", layerName, dtype, err)
-		return 0, 1
-	}
-
-	// Verify loaded dtype matches
-	if loadedDType != dtype {
-		fmt.Printf("  ❌ %s/%s: Loaded dtype mismatch (got %s)\n", layerName, dtype, loadedDType)
-		return 0, 1
-	}
-
-	// Verify output
-	loadedOutput, _ := loaded.ForwardCPU(input)
-	maxErr := computeMaxError(refOutput, loadedOutput)
-
-	threshold := getThreshold(dtype)
-	if maxErr > threshold {
-		fmt.Printf("  ❌ %s/%-8s: error=%.2e (>%.2e) size=%d\n", layerName, dtype, maxErr, threshold, len(jsonData))
-		return 0, 1
-	}
-
-	fmt.Printf("  ✓ %-10s/%-8s: save=%.1fms load=%.1fms size=%s err=%.1e\n",
-		layerName, dtype, saveTime, loadTime, formatSize(len(jsonData)), maxErr)
-	return 1, 0
-}
-
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-func computeMaxError(a, b []float32) float64 {
-	maxErr := float64(0)
-	minLen := len(a)
-	if len(b) < minLen {
-		minLen = len(b)
-	}
-	for i := 0; i < minLen; i++ {
-		diff := math.Abs(float64(a[i]) - float64(b[i]))
-		if diff > maxErr {
-			maxErr = diff
-		}
-	}
-	return maxErr
-}
-
-func getThreshold(dtype string) float64 {
-	switch dtype {
-	case "float64":
-		return 1e-6
-	case "float32":
-		return 1e-6
-	case "int32":
-		return 0.1
-	case "int16":
-		return 0.15
-	case "int8":
-		return 0.25
-	default:
-		return 0.1
-	}
-}
-
-func formatSize(bytes int) string {
-	if bytes < 1024 {
-		return fmt.Sprintf("%dB", bytes)
-	}
-	return fmt.Sprintf("%.1fKB", float64(bytes)/1024)
 }
 
 // =============================================================================
@@ -2465,4 +2169,1750 @@ func compareOutputs(cpu, gpu []float32) bool {
 	}
 
 	return passed
+}
+
+// =========================================================================
+// PART 6: GPU Training Verification (Backward Pass Learning)
+// =========================================================================
+
+// Simple linearly separable dataset
+type Dataset struct {
+	Inputs   [][]float32
+	Outputs  []float64 // Expected class labels (0 or 1)
+	NumClass int
+}
+
+func generateSimpleDataset(numSamples int) *Dataset {
+	inputs := make([][]float32, numSamples)
+	outputs := make([]float64, numSamples)
+
+	for i := 0; i < numSamples; i++ {
+		x0 := rand.Float32()
+		x1 := rand.Float32()
+		inputs[i] = []float32{x0, x1}
+
+		if x0 > 0.5 {
+			outputs[i] = 1.0
+		} else {
+			outputs[i] = 0.0
+		}
+	}
+
+	return &Dataset{
+		Inputs:   inputs,
+		Outputs:  outputs,
+		NumClass: 2,
+	}
+}
+
+// LayerTestConfig defines configuration for testing a specific layer type
+type LayerTestConfig struct {
+	Name          string
+	LayerType     string
+	Activation    string
+	HiddenSize    int
+	SeqLength     int
+	UseConvFormat bool
+}
+
+// LayerTestResult stores training results for a specific layer type
+type LayerTestResult struct {
+	Config       LayerTestConfig
+	IsGPU        bool
+	LossHistory  []float32
+	InitialAcc   float64
+	FinalAcc     float64
+	TrainTime    time.Duration
+	Success      bool
+	ErrorMessage string
+}
+
+func getLayerTestConfigs() []LayerTestConfig {
+	return []LayerTestConfig{
+		{Name: "Dense-1024", LayerType: "dense", Activation: "relu", HiddenSize: 1024},
+		{Name: "Dense-512", LayerType: "dense", Activation: "relu", HiddenSize: 512},
+		{Name: "Dense-256", LayerType: "dense", Activation: "relu", HiddenSize: 256},
+		{Name: "Conv1D-64", LayerType: "conv1d", Activation: "relu", HiddenSize: 64, SeqLength: 16},
+		{Name: "Conv1D-128", LayerType: "conv1d", Activation: "relu", HiddenSize: 128, SeqLength: 16},
+		{Name: "Conv2D-64", LayerType: "conv2d", Activation: "relu", HiddenSize: 64, UseConvFormat: true},
+		{Name: "Conv2D-128", LayerType: "conv2d", Activation: "relu", HiddenSize: 128, UseConvFormat: true},
+		{Name: "RNN-128", LayerType: "rnn", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
+		{Name: "RNN-256", LayerType: "rnn", Activation: "tanh", HiddenSize: 256, SeqLength: 8},
+		{Name: "LSTM-128", LayerType: "lstm", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
+		{Name: "LSTM-256", LayerType: "lstm", Activation: "tanh", HiddenSize: 256, SeqLength: 8},
+		{Name: "LayerNorm-256", LayerType: "layernorm", Activation: "none", HiddenSize: 256},
+		{Name: "LayerNorm-512", LayerType: "layernorm", Activation: "none", HiddenSize: 512},
+		{Name: "RMSNorm-256", LayerType: "rmsnorm", Activation: "none", HiddenSize: 256},
+		{Name: "RMSNorm-512", LayerType: "rmsnorm", Activation: "none", HiddenSize: 512},
+		{Name: "SwiGLU-256", LayerType: "swiglu", Activation: "none", HiddenSize: 256},
+		{Name: "SwiGLU-512", LayerType: "swiglu", Activation: "none", HiddenSize: 512},
+		{Name: "MHA-4h", LayerType: "mha", Activation: "none", HiddenSize: 64, SeqLength: 8},
+		{Name: "MHA-8h", LayerType: "mha", Activation: "none", HiddenSize: 128, SeqLength: 8},
+		{Name: "Softmax-256", LayerType: "softmax", Activation: "none", HiddenSize: 256},
+		{Name: "Combined-Hybrid", LayerType: "combined", Activation: "relu", HiddenSize: 64, SeqLength: 8},
+	}
+}
+
+func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Network, error) {
+	var jsonConfig string
+
+	switch config.LayerType {
+	case "dense":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "%s", "input_height": 2, "output_height": %d},
+				{"type": "dense", "activation": "%s", "input_height": %d, "output_height": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.Activation, config.HiddenSize,
+			config.Activation, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "conv2d":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": 16},
+				{"type": "conv2d", "activation": "%s", "input_channels": 1, "input_height": 4, "input_width": 4, "filters": %d, "kernel_size": 3, "stride": 1, "padding": 1, "output_height": 4, "output_width": 4},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.Activation, config.HiddenSize, config.HiddenSize*16)
+
+	case "rnn":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "rnn", "activation": "%s", "seq_length": %d, "input_size": %d, "hidden_size": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength*config.HiddenSize,
+			config.Activation, config.SeqLength, config.HiddenSize, config.HiddenSize, config.HiddenSize*config.SeqLength)
+
+	case "conv1d":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "conv1d", "activation": "%s", "in_channels": 1, "filters": %d, "kernel_size": 3, "seq_len": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength,
+			config.Activation, config.HiddenSize, config.SeqLength, config.HiddenSize*(config.SeqLength-2))
+
+	case "lstm":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "lstm", "activation": "%s", "seq_length": %d, "input_size": %d, "hidden_size": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.SeqLength*config.HiddenSize,
+			config.Activation, config.SeqLength, config.HiddenSize, config.HiddenSize, config.HiddenSize*config.SeqLength)
+
+	case "layernorm":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "layernorm", "norm_size": %d, "epsilon": 0.00001},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "rmsnorm":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "rmsnorm", "norm_size": %d, "epsilon": 0.00001},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "swiglu":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "swiglu", "input_height": %d, "output_height": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "softmax":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "softmax", "softmax_rows": 1, "softmax_cols": %d},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.HiddenSize, config.HiddenSize, config.HiddenSize)
+
+	case "mha":
+		numHeads := config.SeqLength
+		if numHeads < 1 {
+			numHeads = 4
+		}
+		embedDim := config.HiddenSize
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": %d, "seq_length": 1},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, embedDim, embedDim, numHeads, embedDim)
+
+	case "combined":
+		seqLen := config.SeqLength
+		hidden := config.HiddenSize
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 9,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": %d},
+				{"type": "swiglu", "input_height": %d, "output_height": %d},
+				{"type": "layernorm", "norm_size": %d, "epsilon": 1e-5},
+				{"type": "conv1d", "activation": "relu", "input_channels": %d, "filters": %d, "kernel_size": 3, "padding": 1, "input_length": %d},
+				{"type": "rnn", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
+				{"type": "lstm", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": 1},
+				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-5},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize,
+			seqLen*hidden,
+			seqLen*hidden, seqLen*hidden,
+			seqLen*hidden,
+			hidden, hidden, seqLen,
+			hidden, hidden, seqLen,
+			hidden, hidden, seqLen,
+			hidden,
+			hidden*seqLen,
+			hidden*seqLen)
+
+	default:
+		return nil, fmt.Errorf("unsupported layer type: %s", config.LayerType)
+	}
+
+	return nn.BuildNetworkFromJSON(jsonConfig)
+}
+
+func cloneWeights(src, dst *nn.Network) {
+	for i := 0; i < src.TotalLayers(); i++ {
+		if len(src.Layers[i].Kernel) > 0 {
+			dst.Layers[i].Kernel = make([]float32, len(src.Layers[i].Kernel))
+			copy(dst.Layers[i].Kernel, src.Layers[i].Kernel)
+		}
+		if len(src.Layers[i].Bias) > 0 {
+			dst.Layers[i].Bias = make([]float32, len(src.Layers[i].Bias))
+			copy(dst.Layers[i].Bias, src.Layers[i].Bias)
+		}
+	}
+}
+
+func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) ([]float32, time.Duration, error) {
+	name := "CPU"
+	if isGPU {
+		name = "GPU"
+	}
+
+	numSamples := len(dataset.Inputs)
+	inputSize := len(dataset.Inputs[0])
+	outputSize := 2
+
+	if batchSize <= 0 {
+		batchSize = 1
+	}
+	numBatches := numSamples / batchSize
+
+	lossHistory := make([]float32, epochs)
+	startTime := time.Now()
+
+	if isGPU {
+		err := network.InitGPU()
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to init GPU: %v", err)
+		}
+		defer network.ReleaseGPU()
+	}
+
+	for epoch := 0; epoch < epochs; epoch++ {
+		totalLoss := float32(0.0)
+
+		for b := 0; b < numBatches; b++ {
+			idxStart := b * batchSize
+			idxEnd := idxStart + batchSize
+			if idxEnd > numSamples {
+				idxEnd = numSamples
+			}
+			currentBatchSize := idxEnd - idxStart
+
+			batchInputLen := currentBatchSize * inputSize
+			batchInput := make([]float32, batchInputLen)
+
+			for i := 0; i < currentBatchSize; i++ {
+				copy(batchInput[i*inputSize:], dataset.Inputs[idxStart+i])
+			}
+
+			// Forward Pass
+			var output []float32
+			if isGPU {
+				var err error
+				output, _, err = network.ForwardGPU(batchInput)
+				if err != nil {
+					return nil, 0, fmt.Errorf("GPU forward failed: %v", err)
+				}
+			} else {
+				output, _ = network.ForwardCPU(batchInput)
+			}
+
+			// Compute Gradients
+			dOutput := make([]float32, len(output))
+			for i := 0; i < currentBatchSize; i++ {
+				absIdx := idxStart + i
+				outStart := i * outputSize
+				sampleOut := output[outStart : outStart+outputSize]
+				class := int(dataset.Outputs[absIdx])
+
+				if class < len(sampleOut) {
+					val := sampleOut[class]
+					if val > 1e-7 {
+						totalLoss += -float32(math.Log(float64(val)))
+					}
+				}
+
+				for j := 0; j < outputSize; j++ {
+					targetVal := 0.0
+					if j == class {
+						targetVal = 1.0
+					}
+					dOutput[outStart+j] = (sampleOut[j] - float32(targetVal)) / float32(currentBatchSize)
+				}
+			}
+
+			// Backward
+			if isGPU {
+				_, _, err := network.BackwardGPUNew(dOutput)
+				if err != nil {
+					return nil, 0, err
+				}
+			} else {
+				network.BackwardCPU(dOutput)
+			}
+
+			network.ApplyGradients(learningRate)
+		}
+
+		avgLoss := totalLoss / float32(numSamples)
+		lossHistory[epoch] = avgLoss
+		if epoch == 0 || epoch == epochs-1 || epoch%10 == 0 {
+			fmt.Printf("  [%s] Epoch %d/%d - Loss: %.4f\n", name, epoch+1, epochs, avgLoss)
+		}
+	}
+
+	totalTime := time.Since(startTime)
+	return lossHistory, totalTime, nil
+}
+
+func printEpochLossTable(results []LayerTestResult, title string, epochs int) {
+	fmt.Printf("\n%s\n", title)
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+	fmt.Printf("%-15s", "Layer Type")
+	epochsToShow := []int{1, 2, 3, 5, 10, 15, 20}
+	for _, e := range epochsToShow {
+		if e <= epochs {
+			fmt.Printf(" | Ep%-3d", e)
+		}
+	}
+	fmt.Printf("\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	for _, result := range results {
+		fmt.Printf("%-15s", result.Config.Name)
+		if !result.Success {
+			fmt.Printf(" | %s\n", result.ErrorMessage)
+			continue
+		}
+
+		for _, e := range epochsToShow {
+			if e <= epochs && e-1 < len(result.LossHistory) {
+				fmt.Printf(" | %.4f", result.LossHistory[e-1])
+			}
+		}
+		fmt.Printf("\n")
+	}
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+}
+
+func printFinalComparisonTable(cpuResults, gpuResults []LayerTestResult) {
+	fmt.Printf("\nFinal Comparison\n")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+	fmt.Printf("%-15s | CPU Acc | GPU Acc |  Speedup | GPU Status\n", "Layer Type")
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	for i := range cpuResults {
+		cpuRes := cpuResults[i]
+		gpuRes := gpuResults[i]
+
+		status := "✓ OK"
+		if !gpuRes.Success {
+			status = "✗ FAIL"
+		}
+
+		speedup := float64(cpuRes.TrainTime) / float64(gpuRes.TrainTime)
+		if !gpuRes.Success {
+			speedup = 0
+		}
+
+		fmt.Printf("%-15s | %6.1f%% | %6.1f%% | %7.2fx | %s\n",
+			cpuRes.Config.Name,
+			cpuRes.FinalAcc*100,
+			gpuRes.FinalAcc*100,
+			speedup,
+			status)
+	}
+	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+}
+
+func runGPUTrainingVerification() (int, int) {
+	if *gpuFlag != "" {
+		fmt.Printf("Requesting GPU adapter matching: %q\n", *gpuFlag)
+		gpu.SetAdapterPreference(*gpuFlag)
+	}
+
+	rand.Seed(time.Now().UnixNano())
+
+	fmt.Println("Generating linearly separable dataset (100 samples)...")
+	dataset := generateSimpleDataset(100)
+
+	layerConfigs := getLayerTestConfigs()
+	var cpuResults []LayerTestResult
+	var gpuResults []LayerTestResult
+
+	epochs := 20
+	baseLR := float32(0.05)
+
+	for _, config := range layerConfigs {
+		// Filter if needed using global filterFlag?
+		if *filterFlag != "" && !strings.Contains(config.Name, *filterFlag) {
+			continue
+		}
+
+		fmt.Printf("\nTesting: %s\n", config.Name)
+
+		// CPU
+		cpuResult := LayerTestResult{Config: config, IsGPU: false}
+		cpuNetwork, err := createNetworkWithHiddenLayer(1, config)
+		if err != nil {
+			cpuResult.Success = false
+			cpuResult.ErrorMessage = err.Error()
+			cpuResults = append(cpuResults, cpuResult)
+			continue
+		}
+		cpuNetwork.InitializeWeights()
+
+		// Train CPU
+		cpuBM, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		cpuResult.InitialAcc = cpuBM.Accuracy
+
+		cloneNet, _ := createNetworkWithHiddenLayer(20, config) // Batch 20 for GPU later
+		cloneWeights(cpuNetwork, cloneNet)
+
+		lossH, tTime, err := trainNetwork(cpuNetwork, dataset, epochs, baseLR, false, 1)
+		if err != nil {
+			cpuResult.Success = false
+			cpuResult.ErrorMessage = err.Error()
+			cpuResults = append(cpuResults, cpuResult)
+			continue
+		}
+		cpuResult.LossHistory = lossH
+		cpuResult.TrainTime = tTime
+		cpuResult.Success = true
+		cpuAM, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		cpuResult.FinalAcc = cpuAM.Accuracy
+		cpuResults = append(cpuResults, cpuResult)
+
+		// GPU
+		gpuResult := LayerTestResult{Config: config, IsGPU: true}
+		gpuNetwork, err := createNetworkWithHiddenLayer(20, config) // Batch 20
+		if err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = err.Error()
+			gpuResults = append(gpuResults, gpuResult)
+			continue
+		}
+		cloneWeights(cloneNet, gpuNetwork) // Use same init weights
+
+		gpuNetwork.GPU = true
+		if err := gpuNetwork.WeightsToGPU(); err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = err.Error()
+			gpuResults = append(gpuResults, gpuResult)
+			continue
+		}
+		defer gpuNetwork.ReleaseGPUWeights()
+
+		gpuBM, _ := gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		gpuResult.InitialAcc = gpuBM.Accuracy
+
+		gpuLR := baseLR * 5.0 // Higher LR for larger batch?
+		lossH, tTime, err = trainNetwork(gpuNetwork, dataset, epochs, gpuLR, true, 20)
+		if err != nil {
+			gpuResult.Success = false
+			gpuResult.ErrorMessage = err.Error()
+			gpuResults = append(gpuResults, gpuResult)
+			continue
+		}
+		gpuResult.LossHistory = lossH
+		gpuResult.TrainTime = tTime
+		gpuResult.Success = true
+		gpuAM, _ := gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
+		gpuResult.FinalAcc = gpuAM.Accuracy
+		gpuResults = append(gpuResults, gpuResult)
+
+		fmt.Printf("Completed %s: CPU %.1f%% -> %.1f%% | GPU %.1f%% -> %.1f%%\n",
+			config.Name, cpuResult.InitialAcc*100, cpuResult.FinalAcc*100, gpuResult.InitialAcc*100, gpuResult.FinalAcc*100)
+	}
+
+	printEpochLossTable(cpuResults, "CPU Training", epochs)
+	printEpochLossTable(gpuResults, "GPU Training", epochs)
+	printFinalComparisonTable(cpuResults, gpuResults)
+
+	passed := 0
+	failed := 0
+	for _, res := range gpuResults {
+		if res.Success {
+			passed++
+		} else {
+			failed++
+		}
+	}
+	return passed, failed
+}
+
+// =============================================================================
+// Comprehensive Save/Load Test for All Layers and Numerical Types
+// =============================================================================
+// This test verifies that every layer type can be saved and loaded correctly
+// with every supported numerical type (dtype).
+
+// SaveLoadTestResult holds the result of a single test
+type SaveLoadTestResult struct {
+	LayerType   string
+	DType       string
+	Passed      bool
+	Error       string
+	MaxDiff     float32 // Maximum difference between original and loaded weights
+	WeightCount int     // Number of weights tested
+}
+
+// AllSaveLoadDTypes returns all supported numerical types
+func AllSaveLoadDTypes() []string {
+	return []string{
+		"float32",
+		"float64",
+		"bfloat16",
+		"float16",
+		"float8",
+		"float4",
+		"int8",
+		"int16",
+		"int32",
+		"int64",
+		"int4",
+		"uint8",
+		"uint16",
+		"uint32",
+		"uint64",
+	}
+}
+
+// AllSaveLoadLayerTypes returns all layer types with their names
+func AllSaveLoadLayerTypes() []string {
+	return []string{
+		"Dense",
+		"Conv2D",
+		"Conv1D",
+		"MultiHeadAttention",
+		"RNN",
+		"LSTM",
+		"LayerNorm",
+		"RMSNorm",
+		"SwiGLU",
+		"Embedding",
+		"Softmax",
+		"Residual",
+		"Parallel",
+		"Parallel_Add",
+		"Parallel_Avg",
+		"Parallel_Mixed",
+		"Parallel_Nested",
+		"Sequential",
+		"Sequential_Deep",
+		"Sequential_With_RNN",
+	}
+}
+
+// createSaveLoadTestNetwork creates a network with a specific layer type for testing
+func createSaveLoadTestNetwork(layerType string) (*nn.Network, error) {
+	network := nn.NewNetwork(1, 1, 1, 1)
+
+	switch layerType {
+	case "Dense":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:         nn.LayerDense,
+			Activation:   nn.ActivationScaledReLU,
+			InputHeight:  8,
+			OutputHeight: 4,
+			Kernel:       generateRandomWeights(8 * 4),
+			Bias:         generateRandomWeights(4),
+		})
+
+	case "Conv2D":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:          nn.LayerConv2D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 3,
+			Filters:       8,
+			KernelSize:    3,
+			Stride:        1,
+			Padding:       1,
+			InputHeight:   8,
+			InputWidth:    8,
+			OutputHeight:  8,
+			OutputWidth:   8,
+			Kernel:        generateRandomWeights(8 * 3 * 3 * 3),
+			Bias:          generateRandomWeights(8),
+		})
+
+	case "Conv1D":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:          nn.LayerConv1D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 3,
+			Filters:       8,
+			KernelSize:    3,
+			Stride:        1,
+			Padding:       1,
+			InputHeight:   16,
+			InputWidth:    1,
+			OutputHeight:  16,
+			OutputWidth:   1,
+			Kernel:        generateRandomWeights(8 * 3 * 3),
+			Bias:          generateRandomWeights(8),
+		})
+
+	case "MultiHeadAttention":
+		dModel := 16
+		numHeads := 2
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:         nn.LayerMultiHeadAttention,
+			DModel:       dModel,
+			NumHeads:     numHeads,
+			SeqLength:    4,
+			QWeights:     generateRandomWeights(dModel * dModel),
+			KWeights:     generateRandomWeights(dModel * dModel),
+			VWeights:     generateRandomWeights(dModel * dModel),
+			OutputWeight: generateRandomWeights(dModel * dModel),
+			QBias:        generateRandomWeights(dModel),
+			KBias:        generateRandomWeights(dModel),
+			VBias:        generateRandomWeights(dModel),
+			OutputBias:   generateRandomWeights(dModel),
+		})
+
+	case "RNN":
+		inputSize := 8
+		hiddenSize := 16
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:         nn.LayerRNN,
+			Activation:   nn.ActivationTanh,
+			RNNInputSize: inputSize,
+			HiddenSize:   hiddenSize,
+			SeqLength:    4,
+			WeightIH:     generateRandomWeights(inputSize * hiddenSize),
+			WeightHH:     generateRandomWeights(hiddenSize * hiddenSize),
+			BiasH:        generateRandomWeights(hiddenSize),
+		})
+
+	case "LSTM":
+		inputSize := 8
+		hiddenSize := 16
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:         nn.LayerLSTM,
+			RNNInputSize: inputSize,
+			HiddenSize:   hiddenSize,
+			SeqLength:    4,
+			WeightIH_i:   generateRandomWeights(inputSize * hiddenSize),
+			WeightIH_f:   generateRandomWeights(inputSize * hiddenSize),
+			WeightIH_g:   generateRandomWeights(inputSize * hiddenSize),
+			WeightIH_o:   generateRandomWeights(inputSize * hiddenSize),
+			WeightHH_i:   generateRandomWeights(hiddenSize * hiddenSize),
+			WeightHH_f:   generateRandomWeights(hiddenSize * hiddenSize),
+			WeightHH_g:   generateRandomWeights(hiddenSize * hiddenSize),
+			WeightHH_o:   generateRandomWeights(hiddenSize * hiddenSize),
+			BiasH_i:      generateRandomWeights(hiddenSize),
+			BiasH_f:      generateRandomWeights(hiddenSize),
+			BiasH_g:      generateRandomWeights(hiddenSize),
+			BiasH_o:      generateRandomWeights(hiddenSize),
+		})
+
+	case "LayerNorm":
+		normSize := 16
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:     nn.LayerNorm,
+			NormSize: normSize,
+			Epsilon:  1e-5,
+			Gamma:    generateRandomWeights(normSize),
+			Beta:     generateRandomWeights(normSize),
+		})
+
+	case "RMSNorm":
+		normSize := 16
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:     nn.LayerRMSNorm,
+			NormSize: normSize,
+			Epsilon:  1e-5,
+			Gamma:    generateRandomWeights(normSize),
+		})
+
+	case "SwiGLU":
+		inputSize := 16
+		intermediateSize := 32
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:         nn.LayerSwiGLU,
+			InputHeight:  inputSize,
+			OutputHeight: intermediateSize,
+			GateWeights:  generateRandomWeights(inputSize * intermediateSize),
+			UpWeights:    generateRandomWeights(inputSize * intermediateSize),
+			DownWeights:  generateRandomWeights(intermediateSize * inputSize),
+			GateBias:     generateRandomWeights(intermediateSize),
+			UpBias:       generateRandomWeights(intermediateSize),
+			DownBias:     generateRandomWeights(inputSize),
+		})
+
+	case "Embedding":
+		vocabSize := 100
+		embeddingDim := 16
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:             nn.LayerEmbedding,
+			VocabSize:        vocabSize,
+			EmbeddingDim:     embeddingDim,
+			EmbeddingWeights: generateRandomWeights(vocabSize * embeddingDim),
+		})
+
+	case "Softmax":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:           nn.LayerSoftmax,
+			SoftmaxVariant: nn.SoftmaxStandard,
+			SoftmaxRows:    1,
+			SoftmaxCols:    10,
+			Temperature:    1.0,
+		})
+
+	case "Residual":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type: nn.LayerResidual,
+		})
+
+	case "Parallel":
+		// Parallel with two Dense branches - concat mode
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: "concat",
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+			},
+		})
+
+	case "Parallel_Add":
+		// Parallel with add combine mode (requires same-sized outputs)
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: "add",
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationTanh,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+			},
+		})
+
+	case "Parallel_Avg":
+		// Parallel with average combine mode
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: "avg",
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+			},
+		})
+
+	case "Parallel_Mixed":
+		// Parallel with mixed branch types (Dense + SwiGLU)
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: "concat",
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+				{
+					Type:         nn.LayerSwiGLU,
+					InputHeight:  8,
+					OutputHeight: 16,
+					GateWeights:  generateRandomWeights(8 * 16),
+					UpWeights:    generateRandomWeights(8 * 16),
+					DownWeights:  generateRandomWeights(16 * 8),
+					GateBias:     generateRandomWeights(16),
+					UpBias:       generateRandomWeights(16),
+					DownBias:     generateRandomWeights(8),
+				},
+			},
+		})
+
+	case "Parallel_Nested":
+		// Nested parallel structure (Parallel containing Parallel)
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: "concat",
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+				{
+					Type:        nn.LayerParallel,
+					CombineMode: "add",
+					ParallelBranches: []nn.LayerConfig{
+						{
+							Type:         nn.LayerDense,
+							Activation:   nn.ActivationScaledReLU,
+							InputHeight:  8,
+							OutputHeight: 4,
+							Kernel:       generateRandomWeights(8 * 4),
+							Bias:         generateRandomWeights(4),
+						},
+						{
+							Type:         nn.LayerDense,
+							Activation:   nn.ActivationTanh,
+							InputHeight:  8,
+							OutputHeight: 4,
+							Kernel:       generateRandomWeights(8 * 4),
+							Bias:         generateRandomWeights(4),
+						},
+					},
+				},
+			},
+		})
+
+	case "Sequential":
+		// Sequential with two Dense layers
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type: nn.LayerSequential,
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 8,
+					Kernel:       generateRandomWeights(8 * 8),
+					Bias:         generateRandomWeights(8),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+			},
+		})
+
+	case "Sequential_Deep":
+		// Deeper sequential (4 layers)
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type: nn.LayerSequential,
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 16,
+					Kernel:       generateRandomWeights(8 * 16),
+					Bias:         generateRandomWeights(16),
+				},
+				{
+					Type:     nn.LayerNorm,
+					NormSize: 16,
+					Epsilon:  1e-5,
+					Gamma:    generateRandomWeights(16),
+					Beta:     generateRandomWeights(16),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationTanh,
+					InputHeight:  16,
+					OutputHeight: 8,
+					Kernel:       generateRandomWeights(16 * 8),
+					Bias:         generateRandomWeights(8),
+				},
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 4,
+					Kernel:       generateRandomWeights(8 * 4),
+					Bias:         generateRandomWeights(4),
+				},
+			},
+		})
+
+	case "Sequential_With_RNN":
+		// Sequential with RNN layer
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type: nn.LayerSequential,
+			ParallelBranches: []nn.LayerConfig{
+				{
+					Type:         nn.LayerDense,
+					Activation:   nn.ActivationScaledReLU,
+					InputHeight:  8,
+					OutputHeight: 8,
+					Kernel:       generateRandomWeights(8 * 8),
+					Bias:         generateRandomWeights(8),
+				},
+				{
+					Type:         nn.LayerRNN,
+					Activation:   nn.ActivationTanh,
+					RNNInputSize: 8,
+					HiddenSize:   8,
+					SeqLength:    4,
+					WeightIH:     generateRandomWeights(8 * 8),
+					WeightHH:     generateRandomWeights(8 * 8),
+					BiasH:        generateRandomWeights(8),
+				},
+			},
+		})
+
+	default:
+		return nil, fmt.Errorf("unknown layer type: %s", layerType)
+	}
+
+	return network, nil
+}
+
+// generateRandomWeights generates random weights in the range [-1, 1]
+func generateRandomWeights(n int) []float32 {
+	weights := make([]float32, n)
+	for i := range weights {
+		weights[i] = float32(rand.Float64()*2 - 1)
+	}
+	return weights
+}
+
+// extractLayerWeights extracts all weights from a layer for comparison
+func extractLayerWeights(cfg *nn.LayerConfig) []float32 {
+	var weights []float32
+
+	switch cfg.Type {
+	case nn.LayerDense:
+		weights = append(weights, cfg.Kernel...)
+		weights = append(weights, cfg.Bias...)
+	case nn.LayerConv2D, nn.LayerConv1D:
+		weights = append(weights, cfg.Kernel...)
+		weights = append(weights, cfg.Bias...)
+	case nn.LayerMultiHeadAttention:
+		weights = append(weights, cfg.QWeights...)
+		weights = append(weights, cfg.KWeights...)
+		weights = append(weights, cfg.VWeights...)
+		weights = append(weights, cfg.OutputWeight...)
+		weights = append(weights, cfg.QBias...)
+		weights = append(weights, cfg.KBias...)
+		weights = append(weights, cfg.VBias...)
+		weights = append(weights, cfg.OutputBias...)
+	case nn.LayerRNN:
+		weights = append(weights, cfg.WeightIH...)
+		weights = append(weights, cfg.WeightHH...)
+		weights = append(weights, cfg.BiasH...)
+	case nn.LayerLSTM:
+		weights = append(weights, cfg.WeightIH_i...)
+		weights = append(weights, cfg.WeightIH_f...)
+		weights = append(weights, cfg.WeightIH_g...)
+		weights = append(weights, cfg.WeightIH_o...)
+		weights = append(weights, cfg.WeightHH_i...)
+		weights = append(weights, cfg.WeightHH_f...)
+		weights = append(weights, cfg.WeightHH_g...)
+		weights = append(weights, cfg.WeightHH_o...)
+		weights = append(weights, cfg.BiasH_i...)
+		weights = append(weights, cfg.BiasH_f...)
+		weights = append(weights, cfg.BiasH_g...)
+		weights = append(weights, cfg.BiasH_o...)
+	case nn.LayerNorm:
+		weights = append(weights, cfg.Gamma...)
+		weights = append(weights, cfg.Beta...)
+	case nn.LayerRMSNorm:
+		weights = append(weights, cfg.Gamma...)
+	case nn.LayerSwiGLU:
+		weights = append(weights, cfg.GateWeights...)
+		weights = append(weights, cfg.UpWeights...)
+		weights = append(weights, cfg.DownWeights...)
+		weights = append(weights, cfg.GateBias...)
+		weights = append(weights, cfg.UpBias...)
+		weights = append(weights, cfg.DownBias...)
+	case nn.LayerEmbedding:
+		weights = append(weights, cfg.EmbeddingWeights...)
+	case nn.LayerParallel, nn.LayerSequential:
+		for _, branch := range cfg.ParallelBranches {
+			weights = append(weights, extractLayerWeights(&branch)...)
+		}
+	}
+
+	return weights
+}
+
+// compareWeightSlices compares two weight slices and returns max difference
+func compareWeightSlices(original, loaded []float32, tolerance float32) (bool, float32) {
+	if len(original) != len(loaded) {
+		return false, -1
+	}
+
+	if len(original) == 0 {
+		// No weights to compare (e.g., Softmax, Residual)
+		return true, 0
+	}
+
+	maxDiff := float32(0)
+	for i := range original {
+		diff := float32(math.Abs(float64(original[i] - loaded[i])))
+		if diff > maxDiff {
+			maxDiff = diff
+		}
+	}
+
+	return maxDiff <= tolerance, maxDiff
+}
+
+// getSaveLoadTolerance returns acceptable tolerance for a given dtype
+func getSaveLoadTolerance(dtype string) float32 {
+	switch dtype {
+	case "float64", "float32":
+		return 0.0001
+	case "bfloat16":
+		return 0.01 // BFloat16 has lower precision
+	case "float16":
+		return 0.01
+	case "float8":
+		return 0.1 // 8-bit float has very limited precision
+	case "float4":
+		return 0.2 // 4-bit quantization has large errors
+	case "int8":
+		return 0.01
+	case "int16":
+		return 0.0001
+	case "int32":
+		return 0.0001
+	case "int64":
+		return 0.01 // Same as int8, we use scale=127 to avoid precision issues
+	case "int4":
+		return 2.0 // 4-bit integer has extremely limited precision (only 16 levels)
+	case "uint8":
+		return 0.01
+	case "uint16":
+		return 0.0001
+	case "uint32", "uint64":
+		return 0.0001
+	default:
+		return 0.0001
+	}
+}
+
+// runSaveLoadLayerTest tests saving and loading a specific layer with a specific dtype
+func runSaveLoadLayerTest(layerType, dtype string) SaveLoadTestResult {
+	result := SaveLoadTestResult{
+		LayerType: layerType,
+		DType:     dtype,
+	}
+
+	// Create network with the layer
+	network, err := createSaveLoadTestNetwork(layerType)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to create network: %v", err)
+		return result
+	}
+
+	// Get original weights
+	originalCfg := network.GetLayer(0, 0, 0)
+	originalWeights := extractLayerWeights(originalCfg)
+	result.WeightCount = len(originalWeights)
+
+	// Save with dtype
+	modelID := fmt.Sprintf("test_%s_%s", layerType, dtype)
+	jsonString, err := network.SaveModelWithDType(modelID, dtype)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to save: %v", err)
+		return result
+	}
+
+	// Load back
+	loadedNetwork, storedDType, err := nn.LoadModelWithDType(jsonString, modelID, dtype)
+	if err != nil {
+		result.Error = fmt.Sprintf("failed to load: %v", err)
+		return result
+	}
+
+	if storedDType != dtype {
+		result.Error = fmt.Sprintf("dtype mismatch: expected %s, got %s", dtype, storedDType)
+		return result
+	}
+
+	// Get loaded weights
+	loadedCfg := loadedNetwork.GetLayer(0, 0, 0)
+	loadedWeights := extractLayerWeights(loadedCfg)
+
+	// Compare weights
+	tolerance := getSaveLoadTolerance(dtype)
+	passed, maxDiff := compareWeightSlices(originalWeights, loadedWeights, tolerance)
+
+	result.Passed = passed
+	result.MaxDiff = maxDiff
+
+	if !passed && len(originalWeights) > 0 {
+		result.Error = fmt.Sprintf("weight mismatch: max diff %.6f > tolerance %.6f", maxDiff, tolerance)
+	}
+
+	return result
+}
+
+// runAllSaveLoadTests runs all layer/dtype combinations
+func runAllSaveLoadTests() []SaveLoadTestResult {
+	layerTypes := AllSaveLoadLayerTypes()
+	dtypes := AllSaveLoadDTypes()
+
+	var results []SaveLoadTestResult
+
+	for _, layerType := range layerTypes {
+		for _, dtype := range dtypes {
+			result := runSaveLoadLayerTest(layerType, dtype)
+			results = append(results, result)
+		}
+	}
+
+	return results
+}
+
+// printSaveLoadResults prints the test results in a nice table
+func printSaveLoadResults(results []SaveLoadTestResult) {
+	fmt.Println("\n╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                                          🧪 SAVE/LOAD TEST RESULTS: All Layers × All Numerical Types 🧪                                                              ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+
+	// Group by layer type
+	layerTypes := AllSaveLoadLayerTypes()
+	dtypes := AllSaveLoadDTypes()
+
+	// Create result map
+	resultMap := make(map[string]map[string]SaveLoadTestResult)
+	for _, r := range results {
+		if resultMap[r.LayerType] == nil {
+			resultMap[r.LayerType] = make(map[string]SaveLoadTestResult)
+		}
+		resultMap[r.LayerType][r.DType] = r
+	}
+
+	// Print header
+	fmt.Printf("\n%-20s │", "Layer Type")
+	for _, dtype := range dtypes {
+		fmt.Printf(" %8s │", dtype[:min(8, len(dtype))])
+	}
+	fmt.Println()
+	fmt.Print(strings.Repeat("─", 21) + "┼")
+	for range dtypes {
+		fmt.Print(strings.Repeat("─", 10) + "┼")
+	}
+	fmt.Println()
+
+	// Print rows
+	passed := 0
+	failed := 0
+	for _, layerType := range layerTypes {
+		fmt.Printf("%-20s │", layerType)
+		for _, dtype := range dtypes {
+			r := resultMap[layerType][dtype]
+			if r.Passed {
+				passed++
+				if r.WeightCount == 0 {
+					fmt.Printf("   %s    │", "✓ N/A")
+				} else {
+					fmt.Printf("   %s    │", "✓")
+				}
+			} else {
+				failed++
+				fmt.Printf("   %s    │", "✗")
+			}
+		}
+		fmt.Println()
+	}
+
+	fmt.Print(strings.Repeat("─", 21) + "┴")
+	for range dtypes {
+		fmt.Print(strings.Repeat("─", 10) + "┴")
+	}
+	fmt.Println()
+
+	// Summary
+	fmt.Printf("\n✅ Passed: %d / %d\n", passed, passed+failed)
+	fmt.Printf("❌ Failed: %d / %d\n", failed, passed+failed)
+
+	// Print failures if any
+	if failed > 0 {
+		fmt.Println("\n═══ FAILURES ═══")
+		for _, r := range results {
+			if !r.Passed {
+				fmt.Printf("❌ %s + %s: %s (max diff: %.6f, weights: %d)\n",
+					r.LayerType, r.DType, r.Error, r.MaxDiff, r.WeightCount)
+			}
+		}
+	}
+
+	// Print precision analysis
+	fmt.Println("\n═══ PRECISION ANALYSIS (Max Difference per DType) ═══")
+	dtypeMaxDiff := make(map[string]float32)
+	for _, r := range results {
+		if r.Passed && r.MaxDiff > dtypeMaxDiff[r.DType] {
+			dtypeMaxDiff[r.DType] = r.MaxDiff
+		}
+	}
+	for _, dtype := range dtypes {
+		maxDiff := dtypeMaxDiff[dtype]
+		tolerance := getSaveLoadTolerance(dtype)
+		bar := strings.Repeat("█", int(maxDiff/tolerance*20))
+		if len(bar) > 40 {
+			bar = bar[:40]
+		}
+		fmt.Printf("%-10s │ max diff: %.6f │ tolerance: %.4f │ %s\n", dtype, maxDiff, tolerance, bar)
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// =============================================================================
+// COMPREHENSIVE PARALLEL PERMUTATION TESTS
+// =============================================================================
+
+// AllCombineModes returns all supported parallel combine modes
+func AllCombineModes() []string {
+	return []string{"concat", "add", "avg"}
+}
+
+// AllBranchLayerTypes returns layer types that can be used as branches
+func AllBranchLayerTypes() []string {
+	return []string{
+		"Dense",
+		"Conv2D",
+		"Conv1D",
+		"MultiHeadAttention",
+		"RNN",
+		"LSTM",
+		"LayerNorm",
+		"RMSNorm",
+		"SwiGLU",
+		"Softmax",
+	}
+}
+
+// createSaveLoadBranchConfig creates a LayerConfig for a given branch type
+func createSaveLoadBranchConfig(branchType string, outputSize int) nn.LayerConfig {
+	switch branchType {
+	case "Dense":
+		return nn.LayerConfig{
+			Type:         nn.LayerDense,
+			Activation:   nn.ActivationScaledReLU,
+			InputHeight:  8,
+			OutputHeight: outputSize,
+			Kernel:       generateRandomWeights(8 * outputSize),
+			Bias:         generateRandomWeights(outputSize),
+		}
+	case "Conv2D":
+		return nn.LayerConfig{
+			Type:          nn.LayerConv2D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 1,
+			Filters:       outputSize,
+			KernelSize:    1,
+			Stride:        1,
+			Padding:       0,
+			InputHeight:   2,
+			InputWidth:    4,
+			OutputHeight:  2,
+			OutputWidth:   4,
+			Kernel:        generateRandomWeights(outputSize * 1 * 1 * 1),
+			Bias:          generateRandomWeights(outputSize),
+		}
+	case "Conv1D":
+		return nn.LayerConfig{
+			Type:          nn.LayerConv1D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 1,
+			Filters:       outputSize,
+			KernelSize:    1,
+			Stride:        1,
+			Padding:       0,
+			InputHeight:   8,
+			InputWidth:    1,
+			OutputHeight:  8,
+			OutputWidth:   1,
+			Kernel:        generateRandomWeights(outputSize * 1 * 1),
+			Bias:          generateRandomWeights(outputSize),
+		}
+	case "MultiHeadAttention":
+		dModel := outputSize
+		return nn.LayerConfig{
+			Type:         nn.LayerMultiHeadAttention,
+			DModel:       dModel,
+			NumHeads:     1,
+			SeqLength:    1,
+			QWeights:     generateRandomWeights(dModel * dModel),
+			KWeights:     generateRandomWeights(dModel * dModel),
+			VWeights:     generateRandomWeights(dModel * dModel),
+			OutputWeight: generateRandomWeights(dModel * dModel),
+			QBias:        generateRandomWeights(dModel),
+			KBias:        generateRandomWeights(dModel),
+			VBias:        generateRandomWeights(dModel),
+			OutputBias:   generateRandomWeights(dModel),
+		}
+	case "RNN":
+		return nn.LayerConfig{
+			Type:         nn.LayerRNN,
+			Activation:   nn.ActivationTanh,
+			RNNInputSize: 8,
+			HiddenSize:   outputSize,
+			SeqLength:    1,
+			WeightIH:     generateRandomWeights(8 * outputSize),
+			WeightHH:     generateRandomWeights(outputSize * outputSize),
+			BiasH:        generateRandomWeights(outputSize),
+		}
+	case "LSTM":
+		return nn.LayerConfig{
+			Type:         nn.LayerLSTM,
+			RNNInputSize: 8,
+			HiddenSize:   outputSize,
+			SeqLength:    1,
+			WeightIH_i:   generateRandomWeights(8 * outputSize),
+			WeightIH_f:   generateRandomWeights(8 * outputSize),
+			WeightIH_g:   generateRandomWeights(8 * outputSize),
+			WeightIH_o:   generateRandomWeights(8 * outputSize),
+			WeightHH_i:   generateRandomWeights(outputSize * outputSize),
+			WeightHH_f:   generateRandomWeights(outputSize * outputSize),
+			WeightHH_g:   generateRandomWeights(outputSize * outputSize),
+			WeightHH_o:   generateRandomWeights(outputSize * outputSize),
+			BiasH_i:      generateRandomWeights(outputSize),
+			BiasH_f:      generateRandomWeights(outputSize),
+			BiasH_g:      generateRandomWeights(outputSize),
+			BiasH_o:      generateRandomWeights(outputSize),
+		}
+	case "LayerNorm":
+		return nn.LayerConfig{
+			Type:     nn.LayerNorm,
+			NormSize: outputSize,
+			Epsilon:  1e-5,
+			Gamma:    generateRandomWeights(outputSize),
+			Beta:     generateRandomWeights(outputSize),
+		}
+	case "RMSNorm":
+		return nn.LayerConfig{
+			Type:     nn.LayerRMSNorm,
+			NormSize: outputSize,
+			Epsilon:  1e-5,
+			Gamma:    generateRandomWeights(outputSize),
+		}
+	case "SwiGLU":
+		return nn.LayerConfig{
+			Type:         nn.LayerSwiGLU,
+			InputHeight:  8,
+			OutputHeight: 16,
+			GateWeights:  generateRandomWeights(8 * 16),
+			UpWeights:    generateRandomWeights(8 * 16),
+			DownWeights:  generateRandomWeights(16 * outputSize),
+			GateBias:     generateRandomWeights(16),
+			UpBias:       generateRandomWeights(16),
+			DownBias:     generateRandomWeights(outputSize),
+		}
+	case "Softmax":
+		return nn.LayerConfig{
+			Type:           nn.LayerSoftmax,
+			SoftmaxVariant: nn.SoftmaxStandard,
+			SoftmaxRows:    1,
+			SoftmaxCols:    outputSize,
+			Temperature:    1.0,
+		}
+	default:
+		return nn.LayerConfig{
+			Type:         nn.LayerDense,
+			Activation:   nn.ActivationScaledReLU,
+			InputHeight:  8,
+			OutputHeight: outputSize,
+			Kernel:       generateRandomWeights(8 * outputSize),
+			Bias:         generateRandomWeights(outputSize),
+		}
+	}
+}
+
+// SaveLoadPermutationResult holds result for parallel permutation test
+type SaveLoadPermutationResult struct {
+	BranchType1  string
+	BranchType2  string
+	CombineMode  string
+	DType        string
+	NestingDepth int
+	Passed       bool
+	Error        string
+	MaxDiff      float32
+}
+
+// runSaveLoadPermutationTest tests a specific parallel configuration
+func runSaveLoadPermutationTest(branch1, branch2, combineMode, dtype string, nestingDepth int) SaveLoadPermutationResult {
+	result := SaveLoadPermutationResult{
+		BranchType1:  branch1,
+		BranchType2:  branch2,
+		CombineMode:  combineMode,
+		DType:        dtype,
+		NestingDepth: nestingDepth,
+	}
+
+	network := nn.NewNetwork(1, 1, 1, 1)
+
+	// For add/avg modes, outputs must be same size
+	outputSize := 4
+	if combineMode == "add" || combineMode == "avg" {
+		outputSize = 8 // Same as input for passthrough-like behavior
+	}
+
+	branch1Cfg := createSaveLoadBranchConfig(branch1, outputSize)
+	branch2Cfg := createSaveLoadBranchConfig(branch2, outputSize)
+
+	var layerCfg nn.LayerConfig
+	if nestingDepth == 0 {
+		// Simple parallel
+		layerCfg = nn.LayerConfig{
+			Type:             nn.LayerParallel,
+			CombineMode:      combineMode,
+			ParallelBranches: []nn.LayerConfig{branch1Cfg, branch2Cfg},
+		}
+	} else {
+		// Nested parallel (depth 1)
+		innerParallel := nn.LayerConfig{
+			Type:             nn.LayerParallel,
+			CombineMode:      "add", // Inner always uses add for same-sized outputs
+			ParallelBranches: []nn.LayerConfig{branch1Cfg, branch2Cfg},
+		}
+		layerCfg = nn.LayerConfig{
+			Type:        nn.LayerParallel,
+			CombineMode: combineMode,
+			ParallelBranches: []nn.LayerConfig{
+				createSaveLoadBranchConfig("Dense", outputSize),
+				innerParallel,
+			},
+		}
+	}
+
+	network.SetLayer(0, 0, 0, layerCfg)
+
+	// Get original weights
+	originalCfg := network.GetLayer(0, 0, 0)
+	originalWeights := extractLayerWeights(originalCfg)
+
+	// Save with dtype
+	modelID := fmt.Sprintf("perm_%s_%s_%s_%s_%d", branch1, branch2, combineMode, dtype, nestingDepth)
+	jsonString, err := network.SaveModelWithDType(modelID, dtype)
+	if err != nil {
+		result.Error = fmt.Sprintf("save failed: %v", err)
+		return result
+	}
+
+	// Load back
+	loadedNetwork, storedDType, err := nn.LoadModelWithDType(jsonString, modelID, dtype)
+	if err != nil {
+		result.Error = fmt.Sprintf("load failed: %v", err)
+		return result
+	}
+
+	if storedDType != dtype {
+		result.Error = fmt.Sprintf("dtype mismatch: expected %s, got %s", dtype, storedDType)
+		return result
+	}
+
+	// Get loaded weights
+	loadedCfg := loadedNetwork.GetLayer(0, 0, 0)
+	loadedWeights := extractLayerWeights(loadedCfg)
+
+	// Compare weights
+	tolerance := getSaveLoadTolerance(dtype)
+	passed, maxDiff := compareWeightSlices(originalWeights, loadedWeights, tolerance)
+
+	result.Passed = passed
+	result.MaxDiff = maxDiff
+
+	if !passed && len(originalWeights) > 0 {
+		result.Error = fmt.Sprintf("weight mismatch: max diff %.6f > tolerance %.6f", maxDiff, tolerance)
+	}
+
+	return result
+}
+
+// runAllSaveLoadPermutationTests runs all parallel permutation tests
+func runAllSaveLoadPermutationTests() []SaveLoadPermutationResult {
+	branchTypes := AllBranchLayerTypes()
+	combineModes := AllCombineModes()
+	dtypes := []string{"float32", "bfloat16", "int8"} // Representative subset
+	nestingDepths := []int{0, 1}
+
+	var results []SaveLoadPermutationResult
+
+	total := len(branchTypes) * len(branchTypes) * len(combineModes) * len(dtypes) * len(nestingDepths)
+	fmt.Printf("\nRunning %d parallel permutation tests...\n", total)
+
+	count := 0
+	for _, branch1 := range branchTypes {
+		for _, branch2 := range branchTypes {
+			for _, mode := range combineModes {
+				for _, dtype := range dtypes {
+					for _, depth := range nestingDepths {
+						result := runSaveLoadPermutationTest(branch1, branch2, mode, dtype, depth)
+						results = append(results, result)
+						count++
+						if count%100 == 0 {
+							fmt.Printf("  Progress: %d/%d\n", count, total)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return results
+}
+
+// printSaveLoadPermutationResults prints parallel permutation test results
+func printSaveLoadPermutationResults(results []SaveLoadPermutationResult) {
+	passed := 0
+	failed := 0
+	for _, r := range results {
+		if r.Passed {
+			passed++
+		} else {
+			failed++
+		}
+	}
+
+	fmt.Println("\n╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                              🔀 PARALLEL PERMUTATION TESTS: Branch×Branch×Mode×DType×Depth 🔀                                                                        ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+
+	fmt.Printf("\n✅ Passed: %d / %d\n", passed, passed+failed)
+	fmt.Printf("❌ Failed: %d / %d\n", failed, passed+failed)
+
+	// Show failure breakdown if any
+	if failed > 0 {
+		fmt.Println("\n═══ FAILURES (first 20) ═══")
+		count := 0
+		for _, r := range results {
+			if !r.Passed && count < 20 {
+				fmt.Printf("❌ %s+%s mode=%s dtype=%s depth=%d: %s\n",
+					r.BranchType1, r.BranchType2, r.CombineMode, r.DType, r.NestingDepth, r.Error)
+				count++
+			}
+		}
+	}
+
+	// Summary by combine mode
+	fmt.Println("\n═══ RESULTS BY COMBINE MODE ═══")
+	modeStats := make(map[string][2]int) // [passed, total]
+	for _, r := range results {
+		stats := modeStats[r.CombineMode]
+		stats[1]++
+		if r.Passed {
+			stats[0]++
+		}
+		modeStats[r.CombineMode] = stats
+	}
+	for _, mode := range AllCombineModes() {
+		stats := modeStats[mode]
+		pct := 100.0 * float64(stats[0]) / float64(stats[1])
+		bar := strings.Repeat("█", int(pct/5))
+		fmt.Printf("%-10s │ %4d/%4d │ %5.1f%% │ %s\n", mode, stats[0], stats[1], pct, bar)
+	}
+
+	// Summary by branch type
+	fmt.Println("\n═══ RESULTS BY BRANCH TYPE ═══")
+	branchStats := make(map[string][2]int)
+	for _, r := range results {
+		for _, branch := range []string{r.BranchType1, r.BranchType2} {
+			stats := branchStats[branch]
+			stats[1]++
+			if r.Passed {
+				stats[0]++
+			}
+			branchStats[branch] = stats
+		}
+	}
+	for _, branch := range AllBranchLayerTypes() {
+		stats := branchStats[branch]
+		pct := 100.0 * float64(stats[0]) / float64(stats[1])
+		bar := strings.Repeat("█", int(pct/5))
+		fmt.Printf("%-20s │ %4d/%4d │ %5.1f%% │ %s\n", branch, stats[0], stats[1], pct, bar)
+	}
+}
+
+func runMultiPrecisionSerializationTests() {
+	fmt.Println("╔═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╗")
+	fmt.Println("║                                          Save/Load Everything Test                                                                                                    ║")
+	fmt.Println("║                                                                                                                                                                       ║")
+	fmt.Println("║     Testing all layer types with all numerical types for serialization round-trip                                                                                     ║")
+	fmt.Println("╚═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════╝")
+
+	rand.Seed(time.Now().UnixNano())
+
+	start := time.Now()
+
+	// PHASE 1: Basic layer tests
+	fmt.Println("\n══════════════════════════════════════════════════════════════════════════════════════════════════════════════════")
+	fmt.Println("PHASE 1: Basic Layer × DType Tests")
+	fmt.Println("══════════════════════════════════════════════════════════════════════════════════════════════════════════════════")
+	results := runAllSaveLoadTests()
+	printSaveLoadResults(results)
+
+	phase1Failed := false
+	for _, r := range results {
+		if !r.Passed {
+			phase1Failed = true
+			break
+		}
+	}
+
+	// PHASE 2: Parallel permutation tests
+	fmt.Println("\n══════════════════════════════════════════════════════════════════════════════════════════════════════════════════")
+	fmt.Println("PHASE 2: Parallel Permutation Tests (Branch×Branch×Mode×DType×Depth)")
+	fmt.Println("══════════════════════════════════════════════════════════════════════════════════════════════════════════════════")
+	permResults := runAllSaveLoadPermutationTests()
+	printSaveLoadPermutationResults(permResults)
+
+	phase2Failed := false
+	for _, r := range permResults {
+		if !r.Passed {
+			phase2Failed = true
+			break
+		}
+	}
+
+	elapsed := time.Since(start)
+	fmt.Printf("\n⏱️  Total test time: %v\n", elapsed)
+
+	if phase1Failed || phase2Failed {
+		fmt.Println("\n❌ Some tests failed - see detailed validation tables above")
+	} else {
+		fmt.Println("\n✅ All serialization tests passed!")
+	}
 }
