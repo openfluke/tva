@@ -10,9 +10,6 @@ import (
 	"os"
 	"path/filepath"
 
-	"runtime"
-	"text/tabwriter"
-
 	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 )
@@ -28,14 +25,6 @@ const (
 type MNISTSample struct {
 	Image []float32
 	Label int
-}
-
-type VerificationResult struct {
-	DType    string
-	Quality  float64
-	AvgDev   float64
-	FileSize int64
-	RAM      uint64
 }
 
 func main() {
@@ -176,234 +165,88 @@ func main() {
 	// 5. Verify Save/Load Consistency
 	fmt.Println("\n=== Verifying Save/Load Consistency ===")
 
-	// Load CPU model from JSON
-	loadedCPU, err := nn.LoadModel("mnist_cpu_model.json", "mnist_cpu")
-	if err != nil {
-		panic(err)
-	}
-	// Load GPU model from JSON
-	loadedGPU, err := nn.LoadModel("mnist_gpu_model.json", "mnist_gpu")
-	if err != nil {
-		panic(err)
-	}
-
-	// Compare outputs on 10 samples
-	fmt.Println("Comparing outputs of re-loaded models on 10 samples...")
+	// Prepare test inputs
+	verifyInputs := make([][]float32, 10)
 	for i := 0; i < 10; i++ {
-		input := testData[i].Image
-
-		outCPU, _ := loadedCPU.Forward(input)
-		outGPU, _ := loadedGPU.Forward(input) // loadedGPU running on CPU now (default state after load)
-
-		// Basic check if outputs are close
-		diff := float32(0)
-		for j := 0; j < 10; j++ {
-			d := outCPU[j] - outGPU[j]
-			if d < 0 {
-				d = -d
-			}
-			diff += d
-		}
-
-		fmt.Printf("Sample %d Diff: %.6f\n", i, diff)
-		// They won't be identical because training diverges slightly due to floating point ordering/precision on GPU
-		// But they should be deterministic per-backend if re-loaded.
-
-		// Wait, user asked to compare: "save and relaod them iwht both the normal and the safetensor and using 10 samples we get exactly the same outputs upon saving and reloading"
-		// Only check: Reloaded(Model) == Original(Model)
+		verifyInputs[i] = testData[i].Image
 	}
 
-	// Verification 1: Original CPU vs Reloaded CPU
-	verifyReload("CPU JSON", cpuNet, loadedCPU, testData[:10])
-
-	// Verification 2: Original GPU (synced) vs Reloaded GPU
-	verifyReload("GPU JSON", gpuNet, loadedGPU, testData[:10])
-
-	// Verification 3: Safetensors
-	fmt.Println("\n=== Verifying Safetensors ===")
-
-	// Save GPU model to Safetensors
-	safetensorsPath := "mnist_gpu.safetensors"
-	if err := gpuNet.SaveWeightsToSafetensors(safetensorsPath); err != nil {
-		panic(fmt.Sprintf("Failed to save safetensors: %v", err))
-	}
-	fmt.Println("Saved " + safetensorsPath)
-
-	// Load into a fresh network
-	safetensorsNet, err := nn.BuildNetworkFromJSON(configJSON)
+	// Verification 1: CPU JSON
+	resultCPUJSON, err := nn.VerifySaveLoadConsistency(cpuNet, "json", verifyInputs, 1e-6)
 	if err != nil {
 		panic(err)
 	}
-	if err := safetensorsNet.LoadWeightsFromSafetensors(safetensorsPath); err != nil {
-		panic(fmt.Sprintf("Failed to load safetensors: %v", err))
-	}
+	resultCPUJSON.PrintConsistencyResult()
 
-	verifyReload("GPU Safetensors", gpuNet, safetensorsNet, testData[:10])
-
-	// Verification 3b: All Numerical Types
-	fmt.Println("\n=== Verifying All Numerical Types ===")
-
-	// Load base tensors to manipulate
-	baseBytes, err := os.ReadFile(safetensorsPath)
+	// Verification 2: GPU JSON
+	resultGPUJSON, err := nn.VerifySaveLoadConsistency(gpuNet, "json", verifyInputs, 1e-6)
 	if err != nil {
 		panic(err)
 	}
-	baseTensors, err := nn.LoadSafetensorsWithShapes(baseBytes)
+	resultGPUJSON.PrintConsistencyResult()
+
+	// Verification 3: Safetensors (in-memory)
+	resultSafetensors, err := nn.VerifySaveLoadConsistency(gpuNet, "safetensors", verifyInputs, 1e-6)
+	if err != nil {
+		panic(err)
+	}
+	resultSafetensors.PrintConsistencyResult()
+
+	// Verification 4: All Numerical Types
+	fmt.Println("\n=== Benchmarking All Numerical Types ===")
+
+	// Define dtypes and their scales (grouped by type: floats, signed ints, unsigned ints)
+	dtypes := []string{
+		// Float types (largest to smallest precision)
+		"F64", "F32", "F16", "BF16", "F4",
+		// Signed integer types (largest to smallest)
+		"I64", "I32", "I16", "I8",
+		// Unsigned integer types (largest to smallest)
+		"U64", "U32", "U16", "U8",
+	}
+	scales := []float32{
+		// Float scales
+		1.0, 1.0, 1.0, 1.0, 8.0,
+		// Signed int scales
+		1000000.0, 1000000.0, 1000.0, 100.0,
+		// Unsigned int scales
+		1000000.0, 1000000.0, 1000.0, 100.0,
+	}
+
+	// Prepare benchmark inputs (use 100 test samples)
+	benchInputs := make([][]float32, 100)
+	benchExpected := make([]float64, 100)
+	for i := 0; i < 100; i++ {
+		benchInputs[i] = testData[i].Image
+		benchExpected[i] = float64(testData[i].Label)
+	}
+
+	// Run benchmark
+	benchmark, err := nn.BenchmarkNumericalTypes(gpuNet, dtypes, scales, benchInputs, benchExpected)
 	if err != nil {
 		panic(err)
 	}
 
-	dtypes := []struct {
-		Name  string
-		Scale float32
-	}{
-		{"F32", 1.0},
-		{"F64", 1.0},
-		{"F16", 1.0},
-		{"BF16", 1.0},
-		{"F4", 8.0},
-		{"I64", 1000000.0},
-		{"I32", 1000000.0},
-		{"I16", 1000.0},
-		{"I8", 100.0},
-		{"U64", 1000000.0},
-		{"U32", 1000000.0},
-		{"U16", 1000.0},
-		{"U8", 100.0},
+	// Print results
+	benchmark.PrintNumericalTypeSummary()
+
+	// Show best options
+	fmt.Println("\n=== RECOMMENDATIONS ===")
+	if best := benchmark.GetBestByQuality(); best != nil {
+		fmt.Printf("Best Quality: %s (%.2f%% score)\n", best.DType, best.QualityScore)
 	}
-
-	results := []VerificationResult{}
-
-	for _, dt := range dtypes {
-		fmt.Printf("\n>>> Testing DType: %s (Scale: %.1f)\n", dt.Name, dt.Scale)
-
-		// Prepare quantized/converted tensors
-		testTensors := make(map[string]nn.TensorWithShape)
-		isUint := dt.Name[0] == 'U'
-		for k, v := range baseTensors {
-			newVals := make([]float32, len(v.Values))
-			for i, val := range v.Values {
-				if isUint {
-					newVals[i] = (val + 1.0) * dt.Scale
-				} else {
-					newVals[i] = val * dt.Scale
-				}
-			}
-			testTensors[k] = nn.TensorWithShape{
-				Values: newVals,
-				Shape:  v.Shape,
-				DType:  dt.Name,
-			}
-		}
-
-		// Save
-		fname := fmt.Sprintf("mnist_%s.safetensors", dt.Name)
-		if err := nn.SaveSafetensors(fname, testTensors); err != nil {
-			fmt.Printf("  ❌ Save Failed: %v\n", err)
-			continue
-		}
-		defer os.Remove(fname)
-
-		fi, _ := os.Stat(fname)
-		fileSize := fi.Size()
-
-		// Load with Memory Measurement
-		testNet, err := nn.BuildNetworkFromJSON(configJSON)
-		if err != nil {
-			panic(err)
-		}
-
-		runtime.GC()
-		var m1, m2 runtime.MemStats
-		runtime.ReadMemStats(&m1)
-
-		if err := testNet.LoadWeightsFromSafetensors(fname); err != nil {
-			fmt.Printf("  ❌ Load Failed: %v\n", err)
-			continue
-		}
-
-		runtime.ReadMemStats(&m2)
-		ramUsed := m2.HeapAlloc - m1.HeapAlloc
-
-		// Unscale weights if needed
-		unscaleWeights(testNet, dt.Scale, isUint)
-
-		// Evaluate using Deviation Metrics
-		expected := make([]float64, 100)
-		actual := make([]float64, 100)
-		inputs := make([][]float32, 100)
-
-		for i := 0; i < 100; i++ {
-			inputs[i] = testData[i].Image
-			outOrig, _ := gpuNet.Forward(inputs[i])
-			outNew, _ := testNet.Forward(inputs[i])
-
-			maxIdx := 0
-			for j := range outOrig {
-				if outOrig[j] > outOrig[maxIdx] {
-					maxIdx = j
-				}
-			}
-			expected[i] = float64(outOrig[maxIdx])
-			actual[i] = float64(outNew[maxIdx])
-		}
-
-		metrics, err := nn.EvaluateModel(expected, actual)
-		if err != nil {
-			fmt.Printf("  ❌ Evaluation Failed: %v\n", err)
-			continue
-		}
-
-		metrics.PrintSummary()
-
-		results = append(results, VerificationResult{
-			DType:    dt.Name,
-			Quality:  metrics.Score,
-			AvgDev:   metrics.AverageDeviation,
-			FileSize: fileSize,
-			RAM:      ramUsed,
-		})
+	if smallest := benchmark.GetSmallest(); smallest != nil {
+		fmt.Printf("Smallest Size: %s (%s)\n", smallest.DType, formatBytes(smallest.MemoryBytes))
 	}
-
-	// Final Summary Table
-	fmt.Println("\n=== NUMERICAL TYPE COMPARISON SUMMARY ===")
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.Debug)
-	fmt.Fprintln(w, "DType\tQuality Score\tAvg Dev\tFile Size\tRAM Usage")
-	fmt.Fprintln(w, "-----\t-------------\t-------\t---------\t---------")
-	for _, res := range results {
-		fmt.Fprintf(w, "%s\t%.2f%%\t%.4f%%\t%s\t%s\n",
-			res.DType,
-			res.Quality,
-			res.AvgDev,
-			formatBytes(res.FileSize),
-			formatBytes(int64(res.RAM)),
-		)
+	if tradeoff := benchmark.GetBestTradeoff(); tradeoff != nil {
+		fmt.Printf("Best Tradeoff: %s (%.2f%% quality, %s)\n",
+			tradeoff.DType, tradeoff.QualityScore, formatBytes(tradeoff.MemoryBytes))
 	}
-	w.Flush()
 
 	// Clean up
 	gpuNet.ReleaseGPUWeights()
 	os.Remove("mnist_cpu_model.json")
 	os.Remove("mnist_gpu_model.json")
-	os.Remove(safetensorsPath)
-}
-
-func unscaleWeights(n *nn.Network, scale float32, isUint bool) {
-	invScale := 1.0 / scale
-	for i := range n.Layers {
-		l := &n.Layers[i]
-		// Helper to scale slice
-		s := func(data []float32) {
-			for j := range data {
-				data[j] *= invScale
-				if isUint {
-					data[j] -= 1.0
-				}
-			}
-		}
-		s(l.Kernel)
-		s(l.Bias)
-	}
 }
 
 func formatBytes(b int64) string {
@@ -417,34 +260,6 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-func verifyReload(name string, original, reloaded *nn.Network, samples []MNISTSample) {
-	fmt.Printf("\nVerifying %s consistency:\n", name)
-	maxDiff := float32(0)
-	for i, s := range samples {
-		o1, _ := original.Forward(s.Image)
-		o2, _ := reloaded.Forward(s.Image)
-
-		for j := 0; j < len(o1); j++ {
-			diff := o1[j] - o2[j]
-			if diff < 0 {
-				diff = -diff
-			}
-			if diff > maxDiff {
-				maxDiff = diff
-			}
-		}
-		if i == 0 {
-			fmt.Printf("  Sample 0: Orig %v vs Load %v\n", o1[:3], o2[:3])
-		}
-	}
-	fmt.Printf("  Max Difference over %d samples: %.9f\n", len(samples), maxDiff)
-	if maxDiff < 1e-6 {
-		fmt.Println("  ✓ Consistency Confirmed")
-	} else {
-		fmt.Println("  ✗ Consistency FAILED")
-	}
 }
 
 func createBatches(data []MNISTSample, batchSize int) []nn.TrainingBatch {
