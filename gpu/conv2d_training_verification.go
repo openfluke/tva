@@ -69,6 +69,7 @@ func createNetwork(batchSize int) (*nn.Network, error) {
 				"type": "conv2d",
 				"input_height": 5, "input_width": 5, "input_channels": 1,
 				"filters": 8, "kernel_size": 3, "stride": 1, "padding": 0,
+				"output_height": 3, "output_width": 3,
 				"activation": "relu"
 			},
 			{
@@ -109,7 +110,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 				copy(batchInput[i*inputSize:], dataset.Inputs[idxStart+i])
 			}
 
-			output, _ := network.ForwardCPU(batchInput)
+			output, _ := network.Forward(batchInput)
 
 			dOutput := make([]float32, len(output))
 			for i := 0; i < currentBatchSize; i++ {
@@ -134,7 +135,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 				}
 			}
 
-			network.BackwardCPU(dOutput)
+			network.Backward(dOutput)
 			network.ApplyGradients(learningRate)
 		}
 
@@ -151,7 +152,7 @@ func main() {
 	if *gpuFlag != "" {
 		gpu.SetAdapterPreference(*gpuFlag)
 	}
-	rand.Seed(time.Now().UnixNano())
+	rand.Seed(1337) // Fixed seed for reproducibility
 
 	dataset := generateDataset(200)
 
@@ -166,27 +167,31 @@ func main() {
 	metricsBefore, _ := cpuNet.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
 	fmt.Printf("Before: %.1f%%\n", metricsBefore.Accuracy*100)
 
-	// cpuTime, _ := trainNetwork(cpuNet, dataset, *epochsFlag, float32(*lrFlag), false, 1)
-	cpuTime := time.Second * 10
+	// Serialize CPU network (with initialized weights)
+	fmt.Println("Serializing CPU network...")
+	jsonModel, err := cpuNet.SaveModelToString("conv2d_model")
+	if err != nil {
+		panic(fmt.Errorf("failed to serialize model: %v", err))
+	}
+
+	// Train CPU
+	cpuTime, _ := trainNetwork(cpuNet, dataset, *epochsFlag, float32(*lrFlag), false, 1)
 
 	metricsAfter, _ := cpuNet.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
 	fmt.Printf("After: %.1f%%\n", metricsAfter.Accuracy*100)
 	fmt.Printf("Time: %v\n", cpuTime)
 
 	fmt.Println("\n=== GPU Training (Mini-Batch 20) ===")
-	gpuNet, _ := createNetwork(20)
-	// Clone CPU weights
-	gpuNet.Layers[0].Kernel = make([]float32, len(cpuNet.Layers[0].Kernel))
-	copy(gpuNet.Layers[0].Kernel, cpuNet.Layers[0].Kernel)
-	gpuNet.Layers[0].Bias = make([]float32, len(cpuNet.Layers[0].Bias))
-	copy(gpuNet.Layers[0].Bias, cpuNet.Layers[0].Bias)
-	// Dense layer weights too
-	gpuNet.Layers[1].Kernel = make([]float32, len(cpuNet.Layers[1].Kernel))
-	copy(gpuNet.Layers[1].Kernel, cpuNet.Layers[1].Kernel)
-	gpuNet.Layers[1].Bias = make([]float32, len(cpuNet.Layers[1].Bias))
-	copy(gpuNet.Layers[1].Bias, cpuNet.Layers[1].Bias)
+	// Load GPU network from serialized JSON (clones structure and weights)
+	gpuNet, err := nn.LoadModelFromString(jsonModel, "conv2d_model")
+	if err != nil {
+		panic(fmt.Errorf("failed to load model: %v", err))
+	}
 
+	// Configure for GPU
+	gpuNet.BatchSize = 20
 	gpuNet.GPU = true
+
 	fmt.Println("Mounting GPU...")
 	if err := gpuNet.WeightsToGPU(); err != nil {
 		panic(err)
@@ -194,10 +199,14 @@ func main() {
 	defer gpuNet.ReleaseGPUWeights()
 	fmt.Println("GPU Mounted.")
 
-	// Evaluate Before (should match CPU)
+	// Evaluate Before (should match CPU Before)
 	fmt.Println("Evaluating GPU (Before)...")
 	gMetricsBefore, _ := gpuNet.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-	fmt.Printf("Before: %.1f%%\n", gMetricsBefore.Accuracy*100)
+	fmt.Printf("Before: %.1f%% (Should match CPU Before)\n", gMetricsBefore.Accuracy*100)
+
+	if math.Abs(float64(gMetricsBefore.Accuracy-metricsBefore.Accuracy)) > 1e-5 {
+		fmt.Printf("WARNING: Mismatch in initial accuracy! CPU: %.4f, GPU: %.4f\n", metricsBefore.Accuracy, gMetricsBefore.Accuracy)
+	}
 
 	gpuTime, _ := trainNetwork(gpuNet, dataset, *epochsFlag, float32(*lrFlag), true, 20)
 

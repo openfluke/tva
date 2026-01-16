@@ -464,7 +464,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			}
 
 			// Forward Pass
-			output, _ := network.ForwardCPU(batchInput)
+			output, _ := network.Forward(batchInput)
 
 			// Compute Gradients
 			dOutput := make([]float32, len(output))
@@ -500,7 +500,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			}
 
 			// Backward Pass
-			_, _ = network.BackwardCPU(dOutput)
+			_, _ = network.Backward(dOutput)
 
 			// Apply Gradients
 			network.ApplyGradients(learningRate)

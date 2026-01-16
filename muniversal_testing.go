@@ -192,6 +192,25 @@ func main() {
 		allFailedTests = append(allFailedTests, fmt.Sprintf("GPU Training: %d tests failed", f6))
 	}
 
+	// =========================================================================
+	// PART 7: IN-MEMORY SAFETENSORS (WASM) TESTS
+	// =========================================================================
+	fmt.Println("\n═══════════════════════════════════════════════════════════════════════")
+	fmt.Println("              PART 7: IN-MEMORY SAFETENSORS (WASM) TESTS               ")
+	fmt.Println("═══════════════════════════════════════════════════════════════════════")
+
+	if *filterFlag == "" || strings.Contains(*filterFlag, "Memory") || strings.Contains(*filterFlag, "WASM") {
+		p7, f7 := runSafeTensorsMemoryTests()
+		sectionResults = append(sectionResults, SectionResult{"Part 7: In-Memory/WASM", p7, f7})
+		totalPassed += p7
+		totalFailed += f7
+		if f7 > 0 {
+			allFailedTests = append(allFailedTests, fmt.Sprintf("In-Memory SafeTensors: %d failed", f7))
+		}
+	} else {
+		fmt.Println("Skipping Part 7 (In-Memory SafeTensors) due to filter")
+	}
+
 	// Final Summary
 	fmt.Println()
 	fmt.Println("╔════════════════════════════════════════════════════════════════════════╗")
@@ -3977,4 +3996,481 @@ func runMultiPrecisionSerializationTests() (int, int, []string) {
 	}
 
 	return totalPassed, totalFailed, failures
+}
+
+// =============================================================================
+// PART 7 IMPL: IN-MEMORY SAFETENSORS (WASM) TESTS
+// =============================================================================
+
+// runSafeTensorsMemoryTests runs all layer+type combinations in memory
+func runSafeTensorsMemoryTests() (int, int) {
+	layers := stm_AllLayerTypes()
+	types := []nn.NumericType{
+		nn.TypeF32, nn.TypeF64, nn.TypeF16, nn.TypeBF16, nn.TypeF4,
+		nn.TypeI8, nn.TypeI16, nn.TypeI32, nn.TypeI64,
+		nn.TypeU8, nn.TypeU16, nn.TypeU32, nn.TypeU64,
+	}
+
+	passed := 0
+	failed := 0
+	total := len(layers)*len(types) + 1 // +1 for Mega-Model
+
+	fmt.Printf("Running %d tests (%d layers × %d types) IN MEMORY (BYTES ONLY)...\n", total, len(layers), len(types))
+
+	// 1. Individual Layer Tests
+	for _, layer := range layers {
+		for _, dtype := range types {
+			result := stm_testLayerWithType(layer, dtype)
+			if result.Passed {
+				passed++
+			} else {
+				failed++
+				fmt.Printf("  ❌ %s/%s Failed: %s\n", layer, dtype, result.Error)
+			}
+		}
+	}
+
+	// 2. Mega-Model Test
+	fmt.Println("Running MEGA-MODEL Combined Test...")
+	megaRes := stm_testAllLayersCombined()
+	if megaRes.Passed {
+		passed++
+		fmt.Println("  ✅ Mega-Model Passed")
+	} else {
+		failed++
+		fmt.Printf("  ❌ Mega-Model Failed: %s\n", megaRes.Error)
+	}
+
+	return passed, failed
+}
+
+// stm_AllLayerTypes returns all layer types to test (renamed to avoid collision)
+func stm_AllLayerTypes() []string {
+	return []string{
+		"Dense", "Conv1D", "Conv2D", "LayerNorm", "RMSNorm",
+		"Embedding", "MultiHeadAttention", "RNN", "LSTM", "SwiGLU", "Softmax",
+	}
+}
+
+// stm_LayerTestResult holds result for a layer+dtype test
+type stm_LayerTestResult struct {
+	LayerType string
+	DType     string
+	Passed    bool
+	Error     string
+	MaxDiff   float32
+}
+
+// stm_createTestNetwork creates a network with a single layer of the specified type
+func stm_createTestNetwork(layerType string) (*nn.Network, error) {
+	// Create a basic 1x1x1 network
+	network := nn.NewNetwork(1, 1, 1, 1)
+
+	var config nn.LayerConfig
+
+	switch layerType {
+	case "Dense":
+		config = nn.LayerConfig{
+			Type:         nn.LayerDense,
+			Activation:   nn.ActivationScaledReLU,
+			InputHeight:  4,
+			OutputHeight: 3,
+			Kernel:       stm_randomWeights(4 * 3),
+			Bias:         stm_randomWeights(3),
+		}
+	case "Conv1D":
+		config = nn.LayerConfig{
+			Type:          nn.LayerConv1D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 2,
+			Filters:       3,
+			KernelSize:    3,
+			Stride:        1,
+			Padding:       1,
+			InputHeight:   8, // Signal length
+			InputWidth:    1,
+			Conv1DFilters: 3,                            // Set duplicate field just in case
+			Kernel:        stm_randomWeights(3 * 2 * 3), // [filters][inChannels][kernelSize]
+			Bias:          stm_randomWeights(3),
+		}
+	case "Conv2D":
+		config = nn.LayerConfig{
+			Type:          nn.LayerConv2D,
+			Activation:    nn.ActivationScaledReLU,
+			InputChannels: 2,
+			Filters:       3,
+			KernelSize:    3,
+			Stride:        1,
+			Padding:       1,
+			InputHeight:   4,
+			InputWidth:    4,
+			Kernel:        stm_randomWeights(3 * 2 * 3 * 3), // [filters][inChannels][H][W]
+			Bias:          stm_randomWeights(3),
+		}
+	case "LayerNorm":
+		config = nn.LayerConfig{
+			Type:     nn.LayerNorm,
+			NormSize: 4,
+			Epsilon:  1e-5,
+			Gamma:    stm_randomWeights(4),
+			Beta:     stm_randomWeights(4),
+		}
+	case "RMSNorm":
+		config = nn.LayerConfig{
+			Type:     nn.LayerRMSNorm,
+			NormSize: 4,
+			Epsilon:  1e-5,
+			Gamma:    stm_randomWeights(4),
+		}
+	case "Embedding":
+		config = nn.LayerConfig{
+			Type:             nn.LayerEmbedding,
+			VocabSize:        10,
+			EmbeddingDim:     4,
+			EmbeddingWeights: stm_randomWeights(10 * 4),
+		}
+	case "MultiHeadAttention":
+		dModel := 8
+		config = nn.LayerConfig{
+			Type:         nn.LayerMultiHeadAttention,
+			DModel:       dModel,
+			NumHeads:     2,
+			SeqLength:    4,
+			QWeights:     stm_randomWeights(dModel * dModel),
+			KWeights:     stm_randomWeights(dModel * dModel),
+			VWeights:     stm_randomWeights(dModel * dModel),
+			OutputWeight: stm_randomWeights(dModel * dModel),
+			QBias:        stm_randomWeights(dModel),
+			KBias:        stm_randomWeights(dModel),
+			VBias:        stm_randomWeights(dModel),
+			OutputBias:   stm_randomWeights(dModel),
+		}
+	case "RNN":
+		config = nn.LayerConfig{
+			Type:         nn.LayerRNN,
+			Activation:   nn.ActivationTanh,
+			RNNInputSize: 4,
+			HiddenSize:   8,
+			SeqLength:    4,
+			WeightIH:     stm_randomWeights(8 * 4),
+			WeightHH:     stm_randomWeights(8 * 8),
+			BiasH:        stm_randomWeights(8),
+		}
+	case "LSTM":
+		inputSize := 4
+		hiddenSize := 8
+		config = nn.LayerConfig{
+			Type:         nn.LayerLSTM,
+			RNNInputSize: inputSize,
+			HiddenSize:   hiddenSize,
+			SeqLength:    4,
+			WeightIH_i:   stm_randomWeights(inputSize * hiddenSize),
+			WeightIH_f:   stm_randomWeights(inputSize * hiddenSize),
+			WeightIH_g:   stm_randomWeights(inputSize * hiddenSize),
+			WeightIH_o:   stm_randomWeights(inputSize * hiddenSize),
+			WeightHH_i:   stm_randomWeights(hiddenSize * hiddenSize),
+			WeightHH_f:   stm_randomWeights(hiddenSize * hiddenSize),
+			WeightHH_g:   stm_randomWeights(hiddenSize * hiddenSize),
+			WeightHH_o:   stm_randomWeights(hiddenSize * hiddenSize),
+			BiasH_i:      stm_randomWeights(hiddenSize),
+			BiasH_f:      stm_randomWeights(hiddenSize),
+			BiasH_g:      stm_randomWeights(hiddenSize),
+			BiasH_o:      stm_randomWeights(hiddenSize),
+		}
+	case "SwiGLU":
+		inputSize := 4
+		intermediateSize := 8
+		config = nn.LayerConfig{
+			Type:         nn.LayerSwiGLU,
+			InputHeight:  inputSize,
+			OutputHeight: intermediateSize,
+			GateWeights:  stm_randomWeights(inputSize * intermediateSize),
+			UpWeights:    stm_randomWeights(inputSize * intermediateSize),
+			DownWeights:  stm_randomWeights(intermediateSize * inputSize),
+			GateBias:     stm_randomWeights(intermediateSize),
+			UpBias:       stm_randomWeights(intermediateSize),
+			DownBias:     stm_randomWeights(inputSize),
+		}
+	case "Softmax":
+		config = nn.LayerConfig{
+			Type:           nn.LayerSoftmax,
+			SoftmaxVariant: nn.SoftmaxStandard,
+		}
+	default:
+		return nil, fmt.Errorf("unsupported layer type: %s", layerType)
+	}
+
+	network.SetLayer(0, 0, 0, config)
+	return network, nil
+}
+
+// stm_randomWeights generates random weights
+func stm_randomWeights(n int) []float32 {
+	w := make([]float32, n)
+	for i := range w {
+		w[i] = rand.Float32()*2 - 1
+	}
+	return w
+}
+
+// stm_extractLayerWeights extracts all weights from a layer's config into a map
+func stm_extractLayerWeights(cfg *nn.LayerConfig) map[string][]float32 {
+	weights := make(map[string][]float32)
+
+	switch cfg.Type {
+	case nn.LayerDense, nn.LayerConv2D, nn.LayerConv1D:
+		if len(cfg.Kernel) > 0 {
+			weights["kernel"] = cfg.Kernel
+		}
+		if len(cfg.Bias) > 0 {
+			weights["bias"] = cfg.Bias
+		}
+	case nn.LayerNorm:
+		if len(cfg.Gamma) > 0 {
+			weights["gamma"] = cfg.Gamma
+		}
+		if len(cfg.Beta) > 0 {
+			weights["beta"] = cfg.Beta
+		}
+	case nn.LayerRMSNorm:
+		if len(cfg.Gamma) > 0 {
+			weights["gamma"] = cfg.Gamma
+		}
+	case nn.LayerEmbedding:
+		if len(cfg.EmbeddingWeights) > 0 {
+			weights["embedding_weights"] = cfg.EmbeddingWeights
+		}
+	case nn.LayerMultiHeadAttention:
+		if len(cfg.QWeights) > 0 {
+			weights["q_weights"] = cfg.QWeights
+		}
+		if len(cfg.KWeights) > 0 {
+			weights["k_weights"] = cfg.KWeights
+		}
+		if len(cfg.VWeights) > 0 {
+			weights["v_weights"] = cfg.VWeights
+		}
+		if len(cfg.OutputWeight) > 0 {
+			weights["output_weight"] = cfg.OutputWeight
+		}
+		if len(cfg.QBias) > 0 {
+			weights["q_bias"] = cfg.QBias
+		}
+		if len(cfg.KBias) > 0 {
+			weights["k_bias"] = cfg.KBias
+		}
+		if len(cfg.VBias) > 0 {
+			weights["v_bias"] = cfg.VBias
+		}
+		if len(cfg.OutputBias) > 0 {
+			weights["output_bias"] = cfg.OutputBias
+		}
+	case nn.LayerRNN:
+		if len(cfg.WeightIH) > 0 {
+			weights["weight_ih"] = cfg.WeightIH
+		}
+		if len(cfg.WeightHH) > 0 {
+			weights["weight_hh"] = cfg.WeightHH
+		}
+		if len(cfg.BiasH) > 0 {
+			weights["bias_h"] = cfg.BiasH
+		}
+	case nn.LayerLSTM:
+		if len(cfg.WeightIH_i) > 0 {
+			weights["weight_ih_i"] = cfg.WeightIH_i
+		}
+		if len(cfg.WeightIH_f) > 0 {
+			weights["weight_ih_f"] = cfg.WeightIH_f
+		}
+		if len(cfg.WeightIH_g) > 0 {
+			weights["weight_ih_g"] = cfg.WeightIH_g
+		}
+		if len(cfg.WeightIH_o) > 0 {
+			weights["weight_ih_o"] = cfg.WeightIH_o
+		}
+		if len(cfg.WeightHH_i) > 0 {
+			weights["weight_hh_i"] = cfg.WeightHH_i
+		}
+		if len(cfg.WeightHH_f) > 0 {
+			weights["weight_hh_f"] = cfg.WeightHH_f
+		}
+		if len(cfg.WeightHH_g) > 0 {
+			weights["weight_hh_g"] = cfg.WeightHH_g
+		}
+		if len(cfg.WeightHH_o) > 0 {
+			weights["weight_hh_o"] = cfg.WeightHH_o
+		}
+		if len(cfg.BiasH_i) > 0 {
+			weights["bias_h_i"] = cfg.BiasH_i
+		}
+		if len(cfg.BiasH_f) > 0 {
+			weights["bias_h_f"] = cfg.BiasH_f
+		}
+		if len(cfg.BiasH_g) > 0 {
+			weights["bias_h_g"] = cfg.BiasH_g
+		}
+		if len(cfg.BiasH_o) > 0 {
+			weights["bias_h_o"] = cfg.BiasH_o
+		}
+	case nn.LayerSwiGLU:
+		if len(cfg.GateWeights) > 0 {
+			weights["gate_weights"] = cfg.GateWeights
+		}
+		if len(cfg.UpWeights) > 0 {
+			weights["up_weights"] = cfg.UpWeights
+		}
+		if len(cfg.DownWeights) > 0 {
+			weights["down_weights"] = cfg.DownWeights
+		}
+		if len(cfg.GateBias) > 0 {
+			weights["gate_bias"] = cfg.GateBias
+		}
+		if len(cfg.UpBias) > 0 {
+			weights["up_bias"] = cfg.UpBias
+		}
+		if len(cfg.DownBias) > 0 {
+			weights["down_bias"] = cfg.DownBias
+		}
+	}
+	return weights
+}
+
+// stm_testLayerWithType tests saving/loading a layer with a specific dtype
+func stm_testLayerWithType(layerType string, dtype nn.NumericType) stm_LayerTestResult {
+	result := stm_LayerTestResult{
+		LayerType: layerType,
+		DType:     string(dtype),
+		Passed:    false,
+	}
+
+	network, err := stm_createTestNetwork(layerType)
+	if err != nil {
+		result.Error = fmt.Sprintf("Create network failed: %v", err)
+		return result
+	}
+
+	layerCfg := network.GetLayer(0, 0, 0)
+	originalWeights := stm_extractLayerWeights(layerCfg) // No & needed
+
+	// Skip weight check for parameter-less layers
+	if len(originalWeights) == 0 {
+		if layerType == "Softmax" {
+			result.Passed = true
+			return result
+		}
+		result.Error = "No weights found"
+		return result
+	}
+
+	// Create SafeTensors tensors (In-Memory)
+	tensors := make(map[string]nn.TensorWithShape)
+	for name, weights := range originalWeights {
+		// Just store as is, let Serialize handle it
+		tensors[name] = nn.TensorWithShape{
+			Values: weights,
+			Shape:  []int{len(weights)},
+			DType:  string(dtype),
+		}
+	}
+
+	// Serialize to bytes
+	bytes, err := nn.SerializeSafetensors(tensors)
+	if err != nil {
+		result.Error = fmt.Sprintf("Serialize failed: %v", err)
+		return result
+	}
+
+	// Load from bytes
+	loadedTensors, err := nn.LoadSafetensorsWithShapes(bytes)
+	if err != nil {
+		result.Error = fmt.Sprintf("Load failed: %v", err)
+		return result
+	}
+
+	// Verify
+	var maxDiff float32
+	for name, original := range originalWeights {
+		loaded, ok := loadedTensors[name]
+		if !ok {
+			result.Error = fmt.Sprintf("Weight %s missing", name)
+			return result
+		}
+
+		for i := range original {
+			// Simulate round trip
+			valAsTarget, _ := nn.ConvertValue(original[i], nn.TypeF32, dtype)
+			valReconstructedInterface, _ := nn.ConvertValue(valAsTarget, dtype, nn.TypeF32)
+			valReconstructed := valReconstructedInterface.(float32)
+
+			diff := float32(math.Abs(float64(loaded.Values[i] - valReconstructed)))
+			if diff > maxDiff {
+				maxDiff = diff
+			}
+			if diff > 1e-6 {
+				result.Error = fmt.Sprintf("Mismatch %s: %.6f vs %.6f", name, valReconstructed, loaded.Values[i])
+				result.MaxDiff = maxDiff
+				return result
+			}
+		}
+	}
+
+	result.Passed = true
+	return result
+}
+
+// stm_testAllLayersCombined tests saving/loading ONE model containing ALL layer types
+func stm_testAllLayersCombined() stm_LayerTestResult {
+	result := stm_LayerTestResult{
+		LayerType: "ALL_COMBINED",
+		DType:     "MIXED",
+		Passed:    false,
+	}
+
+	allWeights := make(map[string]nn.TensorWithShape)
+	originalData := make(map[string][]float32)
+
+	for _, layerType := range stm_AllLayerTypes() {
+		network, _ := stm_createTestNetwork(layerType)
+		layerCfg := network.GetLayer(0, 0, 0)
+		weights := stm_extractLayerWeights(layerCfg)
+		dtype := nn.TypeF32
+
+		for name, w := range weights {
+			uniqueName := fmt.Sprintf("%s_%s", layerType, name)
+			allWeights[uniqueName] = nn.TensorWithShape{
+				Values: w, Shape: []int{len(w)}, DType: string(dtype),
+			}
+			originalData[uniqueName] = w
+		}
+	}
+
+	// Serialize/Load
+	bytes, err := nn.SerializeSafetensors(allWeights)
+	if err != nil {
+		result.Error = fmt.Sprintf("Serialize failed: %v", err)
+		return result
+	}
+	loaded, err := nn.LoadSafetensorsWithShapes(bytes)
+	if err != nil {
+		result.Error = fmt.Sprintf("Load failed: %v", err)
+		return result
+	}
+
+	// Verify
+	for name, original := range originalData {
+		l, ok := loaded[name]
+		if !ok {
+			result.Error = "Missing " + name
+			return result
+		}
+		for i := range original {
+			if original[i] != l.Values[i] {
+				result.Error = fmt.Sprintf("Mismatch %s", name)
+				return result
+			}
+		}
+	}
+
+	result.Passed = true
+	return result
 }
