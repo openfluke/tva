@@ -10,6 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
+	"runtime"
+	"text/tabwriter"
+
 	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 )
@@ -25,6 +28,14 @@ const (
 type MNISTSample struct {
 	Image []float32
 	Label int
+}
+
+type VerificationResult struct {
+	DType    string
+	Quality  float64
+	AvgDev   float64
+	FileSize int64
+	RAM      uint64
 }
 
 func main() {
@@ -229,11 +240,183 @@ func main() {
 
 	verifyReload("GPU Safetensors", gpuNet, safetensorsNet, testData[:10])
 
+	// Verification 3b: All Numerical Types
+	fmt.Println("\n=== Verifying All Numerical Types ===")
+
+	// Load base tensors to manipulate
+	baseBytes, err := os.ReadFile(safetensorsPath)
+	if err != nil {
+		panic(err)
+	}
+	baseTensors, err := nn.LoadSafetensorsWithShapes(baseBytes)
+	if err != nil {
+		panic(err)
+	}
+
+	dtypes := []struct {
+		Name  string
+		Scale float32
+	}{
+		{"F32", 1.0},
+		{"F64", 1.0},
+		{"F16", 1.0},
+		{"BF16", 1.0},
+		{"F4", 1.0},
+		{"I64", 1000000.0},
+		{"I32", 1000000.0},
+		{"I16", 1000.0},
+		{"I8", 100.0},
+		{"U64", 1000000.0},
+		{"U32", 1000000.0},
+		{"U16", 1000.0},
+		{"U8", 100.0},
+	}
+
+	results := []VerificationResult{}
+
+	for _, dt := range dtypes {
+		fmt.Printf("\n>>> Testing DType: %s (Scale: %.1f)\n", dt.Name, dt.Scale)
+
+		// Prepare quantized/converted tensors
+		testTensors := make(map[string]nn.TensorWithShape)
+		isUint := dt.Name[0] == 'U'
+		for k, v := range baseTensors {
+			newVals := make([]float32, len(v.Values))
+			for i, val := range v.Values {
+				if isUint {
+					newVals[i] = (val + 1.0) * dt.Scale
+				} else {
+					newVals[i] = val * dt.Scale
+				}
+			}
+			testTensors[k] = nn.TensorWithShape{
+				Values: newVals,
+				Shape:  v.Shape,
+				DType:  dt.Name,
+			}
+		}
+
+		// Save
+		fname := fmt.Sprintf("mnist_%s.safetensors", dt.Name)
+		if err := nn.SaveSafetensors(fname, testTensors); err != nil {
+			fmt.Printf("  ❌ Save Failed: %v\n", err)
+			continue
+		}
+		defer os.Remove(fname)
+
+		fi, _ := os.Stat(fname)
+		fileSize := fi.Size()
+
+		// Load with Memory Measurement
+		testNet, err := nn.BuildNetworkFromJSON(configJSON)
+		if err != nil {
+			panic(err)
+		}
+
+		runtime.GC()
+		var m1, m2 runtime.MemStats
+		runtime.ReadMemStats(&m1)
+
+		if err := testNet.LoadWeightsFromSafetensors(fname); err != nil {
+			fmt.Printf("  ❌ Load Failed: %v\n", err)
+			continue
+		}
+
+		runtime.ReadMemStats(&m2)
+		ramUsed := m2.HeapAlloc - m1.HeapAlloc
+
+		// Unscale weights if needed
+		unscaleWeights(testNet, dt.Scale, isUint)
+
+		// Evaluate using Deviation Metrics
+		expected := make([]float64, 100)
+		actual := make([]float64, 100)
+		inputs := make([][]float32, 100)
+
+		for i := 0; i < 100; i++ {
+			inputs[i] = testData[i].Image
+			outOrig, _ := gpuNet.Forward(inputs[i])
+			outNew, _ := testNet.Forward(inputs[i])
+
+			maxIdx := 0
+			for j := range outOrig {
+				if outOrig[j] > outOrig[maxIdx] {
+					maxIdx = j
+				}
+			}
+			expected[i] = float64(outOrig[maxIdx])
+			actual[i] = float64(outNew[maxIdx])
+		}
+
+		metrics, err := nn.EvaluateModel(expected, actual)
+		if err != nil {
+			fmt.Printf("  ❌ Evaluation Failed: %v\n", err)
+			continue
+		}
+
+		metrics.PrintSummary()
+
+		results = append(results, VerificationResult{
+			DType:    dt.Name,
+			Quality:  metrics.Score,
+			AvgDev:   metrics.AverageDeviation,
+			FileSize: fileSize,
+			RAM:      ramUsed,
+		})
+	}
+
+	// Final Summary Table
+	fmt.Println("\n=== NUMERICAL TYPE COMPARISON SUMMARY ===")
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', tabwriter.Debug)
+	fmt.Fprintln(w, "DType\tQuality Score\tAvg Dev\tFile Size\tRAM Usage")
+	fmt.Fprintln(w, "-----\t-------------\t-------\t---------\t---------")
+	for _, res := range results {
+		fmt.Fprintf(w, "%s\t%.2f%%\t%.4f%%\t%s\t%s\n",
+			res.DType,
+			res.Quality,
+			res.AvgDev,
+			formatBytes(res.FileSize),
+			formatBytes(int64(res.RAM)),
+		)
+	}
+	w.Flush()
+
 	// Clean up
 	gpuNet.ReleaseGPUWeights()
 	os.Remove("mnist_cpu_model.json")
 	os.Remove("mnist_gpu_model.json")
 	os.Remove(safetensorsPath)
+}
+
+func unscaleWeights(n *nn.Network, scale float32, isUint bool) {
+	invScale := 1.0 / scale
+	for i := range n.Layers {
+		l := &n.Layers[i]
+		// Helper to scale slice
+		s := func(data []float32) {
+			for j := range data {
+				data[j] *= invScale
+				if isUint {
+					data[j] -= 1.0
+				}
+			}
+		}
+		s(l.Kernel)
+		s(l.Bias)
+	}
+}
+
+func formatBytes(b int64) string {
+	const unit = 1024
+	if b < unit {
+		return fmt.Sprintf("%d B", b)
+	}
+	div, exp := int64(unit), 0
+	for n := b / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 func verifyReload(name string, original, reloaded *nn.Network, samples []MNISTSample) {
