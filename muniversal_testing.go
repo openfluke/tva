@@ -334,7 +334,7 @@ func testFilterCombineMode() bool {
 	net.SetLayer(0, 0, 1, nn.InitDenseLayer(2, 2, nn.ActivationSigmoid))
 
 	input := []float32{0.1, 0.2, 0.3, 0.4}
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 
 	if len(output) != 2 {
 		fmt.Printf("  ❌ Expected 2 outputs, got %d\n", len(output))
@@ -366,7 +366,7 @@ func testSequentialLayers() bool {
 	net.SetLayer(0, 0, 0, seq)
 
 	input := []float32{0.1, 0.2, 0.3, 0.4}
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 
 	if len(output) != 2 {
 		fmt.Printf("  ❌ Expected 2 outputs, got %d\n", len(output))
@@ -629,7 +629,7 @@ func testEmbeddingLayer() bool {
 
 	// Forward pass with token index
 	input := []float32{5.0} // Token index 5
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 
 	if len(output) != 4 {
 		fmt.Printf("  ❌ Expected 4 outputs, got %d\n", len(output))
@@ -766,7 +766,7 @@ func testConv1DLayer() bool {
 		input[i] = float32(i) * 0.1
 	}
 
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 	if len(output) != 4 {
 		fmt.Printf("  ❌ Expected 4 outputs, got %d\n", len(output))
 		return false
@@ -875,7 +875,7 @@ func testObserverPattern() bool {
 
 	// Run forward pass
 	input := []float32{1.0, -1.0}
-	net.ForwardCPU(input)
+	net.Forward(input)
 
 	// Retrieve the observer back from the network layer to check events
 	// Since SetLayer copies the config struct, we need to extract the observer from the stored config
@@ -1284,7 +1284,7 @@ func odds_demo1TwoBranchStitched() {
 	for i := range input {
 		input[i] = rand.Float32()
 	}
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 	fmt.Printf("   ✅ Forward pass successful! Output size: %d\n", len(output))
 }
 
@@ -1322,7 +1322,7 @@ func odds_demo2MultiBranchStitched() {
 		for i := range input {
 			input[i] = rand.Float32()
 		}
-		output, _ := net.ForwardCPU(input)
+		output, _ := net.Forward(input)
 		fmt.Printf("      Trial %d: Output val=%.4f\n", trial+1, output[0])
 	}
 }
@@ -1482,8 +1482,8 @@ func odds_demo3TrainGateSpecializationStitched() {
 	lowIn := make([]float32, inputSize)
 	lowIn[0] = 0.1
 
-	hOut, _ := net.ForwardCPU(highIn)
-	lOut, _ := net.ForwardCPU(lowIn)
+	hOut, _ := net.Forward(highIn)
+	lOut, _ := net.Forward(lowIn)
 
 	fmt.Printf("      High Input → Output: %.4f (Expert 1 preferred)\n", hOut[0])
 	fmt.Printf("      Low Input  → Output: %.4f (Expert 2 preferred)\n", lOut[0])
@@ -1563,7 +1563,7 @@ func fd_demo1TwoBranchFilter() {
 		input[i] = rand.Float32()
 	}
 
-	output, _ := net.ForwardCPU(input)
+	output, _ := net.Forward(input)
 	if len(output) == 0 {
 		fmt.Printf("   ❌ Forward failed: empty output\n")
 		return
@@ -1620,7 +1620,7 @@ func fd_demo2MultiBranchFilter() {
 			input[i] = rand.Float32()
 		}
 
-		output, _ := net.ForwardCPU(input)
+		output, _ := net.Forward(input)
 		if len(output) == 0 {
 			fmt.Printf("      Trial %d: ❌ empty output\n", trial+1)
 			continue
@@ -1756,8 +1756,8 @@ func fd_demo3TrainGateSpecialization() {
 	}
 	lowInput[0] = 0.1
 
-	highOut, _ := net.ForwardCPU(highInput)
-	lowOut, _ := net.ForwardCPU(lowInput)
+	highOut, _ := net.Forward(highInput)
+	lowOut, _ := net.Forward(lowInput)
 
 	fmt.Printf("      High input[0]=0.9 → output=%.4f\n", highOut[0])
 	fmt.Printf("      Low input[0]=0.1  → output=%.4f\n", lowOut[0])
@@ -1794,8 +1794,8 @@ func fd_demo3TrainGateSpecialization() {
 	// -----------------------------------------------------------
 	fmt.Printf("   📊 Testing AFTER gate training:\n")
 
-	highOut2, _ := net.ForwardCPU(highInput)
-	lowOut2, _ := net.ForwardCPU(lowInput)
+	highOut2, _ := net.Forward(highInput)
+	lowOut2, _ := net.Forward(lowInput)
 
 	fmt.Printf("      High input[0]=0.9 → output=%.4f (was %.4f)\n", highOut2[0], highOut[0])
 	fmt.Printf("      Low input[0]=0.1  → output=%.4f (was %.4f)\n", lowOut2[0], lowOut[0])
@@ -2147,7 +2147,7 @@ func runGPULayerTest(test GPULayerTestCase) bool {
 
 	// CPU Forward
 	network.GPU = false
-	cpuOutput, _ := network.ForwardCPU(input)
+	cpuOutput, _ := network.Forward(input)
 
 	// GPU Forward
 	gpuForwardOK := false
@@ -2167,7 +2167,7 @@ func runGPULayerTest(test GPULayerTestCase) bool {
 			return
 		}
 
-		gpuOutput, _ = network.ForwardCPU(input)
+		gpuOutput, _ = network.Forward(input)
 		gpuForwardOK = true
 	}()
 
@@ -2577,7 +2577,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			}
 
 			// Forward Pass
-			output, _ := network.ForwardCPU(batchInput)
+			output, _ := network.Forward(batchInput)
 
 			// Compute Gradients
 			dOutput := make([]float32, len(output))
@@ -2613,7 +2613,7 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 			}
 
 			// Backward Pass
-			_, _ = network.BackwardCPU(dOutput)
+			_, _ = network.Backward(dOutput)
 
 			// Apply Gradients
 			network.ApplyGradients(learningRate)
