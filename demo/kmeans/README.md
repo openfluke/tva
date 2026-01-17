@@ -55,7 +55,15 @@ This demo includes recent fixes to the Loom core:
 ---
 
 ## 💻 How to Run
+
+**Standard Benchmark:**
 ```bash
 go run rn6.go
 ```
-Observe the final comparison table to see how Loom's recursive approach provides **100% Interpretability** and **High OOD Detection** where standard Black-Box MLPs fail.
+
+**JSON-Driven Parallel Benchmark (RN6-JSON):**
+```bash
+go run rn6_json.go
+```
+
+Observe the final comparison table to see how Loom's recursive approach provides **100% Interpretability** and **High OOD Detection** where standard Black-Box MLPs fail. The JSON version demonstrates that even complex Parallel MoE architectures can be fully serialized and reloaded with bit-perfect consistency.
