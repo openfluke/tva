@@ -20,6 +20,7 @@ const (
 	MnistTestImagesFile  = "t10k-images-idx3-ubyte"
 	MnistTestLabelsFile  = "t10k-labels-idx1-ubyte"
 	DataDir              = "data"
+	Epochs               = 20
 )
 
 type MNISTSample struct {
@@ -105,18 +106,28 @@ func main() {
 	}
 	cpuNet.InitializeWeights()
 
-	initialWeights, _ := cpuNet.SaveModelToString("mnist_init")
+	// Evaluate before CPU training
+	fmt.Println("\n--- Pre-Training CPU Evaluation ---")
+	metricsBefore, err := cpuNet.EvaluateNetwork(valInputs, valTargets)
+	metricsBefore.PrintSummary()
+
+	//initialWeights, _ := cpuNet.SaveModelToString("mnist_init")
 
 	cpuConfig := &nn.TrainingConfig{
-		Epochs:          2, // Reduced for speed in validation test
+		Epochs:          Epochs, // Reduced for speed in validation test
 		LearningRate:    0.01,
 		UseGPU:          false,
 		LossType:        "cross_entropy",
-		PrintEveryBatch: 0,
+		PrintEveryBatch: 1,
 		Verbose:         true,
 	}
 
 	cpuNet.Train(trainBatches, cpuConfig)
+
+	// Evaluate after CPU training
+	fmt.Println("\n--- Post-Training CPU Evaluation ---")
+	metricAfter, err := cpuNet.EvaluateNetwork(valInputs, valTargets)
+	metricAfter.PrintSummary()
 
 	// Save CPU model (JSON)
 	fmt.Println("Saving CPU model (JSON)...")
@@ -126,16 +137,18 @@ func main() {
 
 	// 4. GPU Training
 	fmt.Println("\n=== Starting GPU Training ===")
-	gpuNet, err := nn.LoadModelFromString(initialWeights, "mnist_init")
+	// Initialize GPU network freshly (random weights) to prove independent learning
+	gpuNet, err := nn.BuildNetworkFromJSON(configJSON)
 	if err != nil {
 		panic(err)
 	}
+	gpuNet.InitializeWeights()
 
 	gpu.SetAdapterPreference("nvidia")
 	gpuNet.BatchSize = batchSize
 
 	gpuConfig := &nn.TrainingConfig{
-		Epochs:          2,
+		Epochs:          Epochs,
 		LearningRate:    0.01,
 		UseGPU:          true,
 		LossType:        "cross_entropy",
@@ -143,10 +156,24 @@ func main() {
 		Verbose:         true,
 	}
 
+	// Evaluate before GPU training
+	// We must enable GPU mode and mount weights explicitly for evaluation to use GPU
+	gpuNet.SetGPU(true)
+	gpuNet.WeightsToGPU()
+
+	fmt.Println("\n--- Pre-Training GPU Evaluation ---")
+	metricsGPUBefore, err := gpuNet.EvaluateNetwork(valInputs, valTargets)
+	metricsGPUBefore.PrintSummary()
+
 	// Train GPU
 	if _, err := gpuNet.Train(trainBatches, gpuConfig); err != nil {
 		panic(err)
 	}
+
+	// Evaluate after GPU training
+	fmt.Println("\n--- Post-Training GPU Evaluation ---")
+	metricsGPUAfter, err := gpuNet.EvaluateNetwork(valInputs, valTargets)
+	metricsGPUAfter.PrintSummary()
 
 	// Sync Weights back to CPU for saving
 	fmt.Println("Syncing GPU weights to CPU...")

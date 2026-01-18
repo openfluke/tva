@@ -77,14 +77,14 @@ type LayerTestConfig struct {
 
 // LayerTestResult stores training results for a specific layer type
 type LayerTestResult struct {
-	Config       LayerTestConfig
-	IsGPU        bool
-	LossHistory  []float32
-	InitialAcc   float64
-	FinalAcc     float64
-	TrainTime    time.Duration
-	Success      bool
-	ErrorMessage string
+	Config         LayerTestConfig
+	IsGPU          bool
+	LossHistory    []float32
+	InitialMetrics *nn.DeviationMetrics
+	FinalMetrics   *nn.DeviationMetrics
+	TrainTime      time.Duration
+	Success        bool
+	ErrorMessage   string
 }
 
 // Define layer types to test
@@ -380,48 +380,6 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 	return nn.BuildNetworkFromJSON(jsonConfig)
 }
 
-func cloneWeights(src, dst *nn.Network) {
-	for i := 0; i < src.TotalLayers(); i++ {
-		s := &src.Layers[i]
-		d := &dst.Layers[i]
-
-		// Generic
-		if len(s.Kernel) > 0 {
-			d.Kernel = append([]float32(nil), s.Kernel...)
-		}
-		if len(s.Bias) > 0 {
-			d.Bias = append([]float32(nil), s.Bias...)
-		}
-
-		// RNN
-		if len(s.WeightIH) > 0 {
-			d.WeightIH = append([]float32(nil), s.WeightIH...)
-		}
-		if len(s.WeightHH) > 0 {
-			d.WeightHH = append([]float32(nil), s.WeightHH...)
-		}
-		if len(s.BiasH) > 0 {
-			d.BiasH = append([]float32(nil), s.BiasH...)
-		}
-
-		// LSTM (4 gates)
-		d.WeightIH_i = append([]float32(nil), s.WeightIH_i...)
-		d.WeightIH_f = append([]float32(nil), s.WeightIH_f...)
-		d.WeightIH_g = append([]float32(nil), s.WeightIH_g...)
-		d.WeightIH_o = append([]float32(nil), s.WeightIH_o...)
-
-		d.WeightHH_i = append([]float32(nil), s.WeightHH_i...)
-		d.WeightHH_f = append([]float32(nil), s.WeightHH_f...)
-		d.WeightHH_g = append([]float32(nil), s.WeightHH_g...)
-		d.WeightHH_o = append([]float32(nil), s.WeightHH_o...)
-
-		d.BiasH_i = append([]float32(nil), s.BiasH_i...)
-		d.BiasH_f = append([]float32(nil), s.BiasH_f...)
-		d.BiasH_g = append([]float32(nil), s.BiasH_g...)
-		d.BiasH_o = append([]float32(nil), s.BiasH_o...)
-	}
-}
-
 func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) ([]float32, time.Duration, error) {
 	name := "CPU"
 	if isGPU {
@@ -519,33 +477,6 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 	return lossHistory, totalTime, nil
 }
 
-func printDeviationTable(name string, before, after *nn.DeviationMetrics) {
-	fmt.Printf("\n╔═══════════════════════════════════════════════════════════════╗\n")
-	fmt.Printf("║  %-59s  ║\n", name)
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║  Accuracy:      %6.1f%% → %6.1f%%                           ║\n",
-		before.Accuracy*100, after.Accuracy*100)
-	fmt.Printf("║  Quality Score: %6.1f   → %6.1f                           ║\n",
-		before.Score, after.Score)
-	fmt.Printf("║  Avg Deviation: %6.1f%% → %6.1f%%                          ║\n",
-		before.AverageDeviation, after.AverageDeviation)
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-	fmt.Printf("║  Deviation Distribution:                                      ║\n")
-	fmt.Printf("╠═══════════════════════════════════════════════════════════════╣\n")
-
-	bucketOrder := []string{"0-10%", "10-20%", "20-30%", "30-40%", "40-50%", "50-100%", "100%+"}
-	for _, bucketName := range bucketOrder {
-		beforeCount := before.Buckets[bucketName].Count
-		afterCount := after.Buckets[bucketName].Count
-		beforePct := float64(beforeCount) / float64(before.TotalSamples) * 100
-		afterPct := float64(afterCount) / float64(after.TotalSamples) * 100
-
-		fmt.Printf("║    %8s: %3d (%5.1f%%) → %3d (%5.1f%%)                    ║\n",
-			bucketName, beforeCount, beforePct, afterCount, afterPct)
-	}
-	fmt.Printf("╚═══════════════════════════════════════════════════════════════╝\n")
-}
-
 // printEpochLossTable prints epoch-by-epoch loss progression for all tested layers
 func printEpochLossTable(results []LayerTestResult, title string, epochs int) {
 	fmt.Printf("\n%s\n", title)
@@ -580,12 +511,21 @@ func printEpochLossTable(results []LayerTestResult, title string, epochs int) {
 	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
 }
 
-// printFinalComparisonTable prints final metrics comparison
 func printFinalComparisonTable(cpuResults, gpuResults []LayerTestResult) {
-	fmt.Printf("\nFinal Comparison\n")
+	fmt.Printf("\nFinal Comparison (using 0-10%% Deviation Bucket)\n")
 	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
-	fmt.Printf("%-15s | CPU Acc | GPU Acc |  Speedup | GPU Status\n", "Layer Type")
+	fmt.Printf("%-15s | CPU DeV%% | GPU DeV%% |  Speedup | GPU Status\n", "Layer Type")
 	fmt.Printf("═══════════════════════════════════════════════════════════════\n")
+
+	getBucketPct := func(m *nn.DeviationMetrics) float64 {
+		if m == nil || m.TotalSamples == 0 {
+			return 0
+		}
+		if b, ok := m.Buckets["0-10%"]; ok {
+			return float64(b.Count) / float64(m.TotalSamples) * 100
+		}
+		return 0
+	}
 
 	for i := range cpuResults {
 		cpuRes := cpuResults[i]
@@ -601,10 +541,13 @@ func printFinalComparisonTable(cpuResults, gpuResults []LayerTestResult) {
 			speedup = 0
 		}
 
+		cpuAcc := getBucketPct(cpuRes.FinalMetrics)
+		gpuAcc := getBucketPct(gpuRes.FinalMetrics)
+
 		fmt.Printf("%-15s | %6.1f%% | %6.1f%% | %7.2fx | %s\n",
 			cpuRes.Config.Name,
-			cpuRes.FinalAcc*100,
-			gpuRes.FinalAcc*100,
+			cpuAcc,
+			gpuAcc,
 			speedup,
 			status)
 	}
@@ -687,6 +630,9 @@ func main() {
 		fmt.Printf("│ Testing: %-52s │\n", config.Name)
 		fmt.Printf("└───────────────────────────────────────────────────────────────┘\n")
 
+		// Capture a seed so both CPU and GPU start with identical weights
+		testSeed := rand.Int63()
+
 		// ===== CPU Training =====
 		fmt.Println("\n[CPU Training]")
 		cpuResult := LayerTestResult{
@@ -694,6 +640,13 @@ func main() {
 			IsGPU:  false,
 		}
 
+		// Create sliced inputs for evaluation (Network expects 2 inputs, Dataset has 4)
+		evalInputs := make([][]float32, len(dataset.Inputs))
+		for i, inp := range dataset.Inputs {
+			evalInputs[i] = inp[:2]
+		}
+
+		rand.Seed(testSeed)
 		cpuNetwork, err := createNetworkWithHiddenLayer(1, config)
 		if err != nil {
 			cpuResult.Success = false
@@ -706,11 +659,8 @@ func main() {
 		cpuNetwork.InitializeWeights()
 
 		// Evaluate before
-		beforeMetrics, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-		cpuResult.InitialAcc = beforeMetrics.Accuracy
-
-		initialWeightsNetwork, _ := createNetworkWithHiddenLayer(20, config)
-		cloneWeights(cpuNetwork, initialWeightsNetwork)
+		beforeMetrics, _ := cpuNetwork.EvaluateNetwork(evalInputs, dataset.Outputs)
+		cpuResult.InitialMetrics = beforeMetrics
 
 		// Train
 		lossHistory, trainTime, err := trainNetwork(cpuNetwork, dataset, *epochsFlag, float32(*lrFlag), false, 1)
@@ -726,21 +676,20 @@ func main() {
 		cpuResult.TrainTime = trainTime
 
 		// Evaluate after
-		afterMetrics, _ := cpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-		cpuResult.FinalAcc = afterMetrics.Accuracy
+		afterMetrics, _ := cpuNetwork.EvaluateNetwork(evalInputs, dataset.Outputs)
+		cpuResult.FinalMetrics = afterMetrics
 		cpuResult.Success = true
 
-		cpuResults = append(cpuResults, cpuResult)
-		fmt.Printf("  ✓ Completed: %.1f%% → %.1f%% accuracy in %v\n",
-			cpuResult.InitialAcc*100, cpuResult.FinalAcc*100, trainTime)
-
 		// ===== GPU Training =====
+		cpuResults = append(cpuResults, cpuResult)
+		nn.PrintDeviationComparisonTable(fmt.Sprintf("CPU Results: %s", config.Name), cpuResult.InitialMetrics, cpuResult.FinalMetrics)
 		fmt.Println("\n[GPU Training]")
 		gpuResult := LayerTestResult{
 			Config: config,
 			IsGPU:  true,
 		}
 
+		rand.Seed(testSeed)
 		gpuNetwork, err := createNetworkWithHiddenLayer(20, config)
 		if err != nil {
 			gpuResult.Success = false
@@ -750,8 +699,7 @@ func main() {
 			continue
 		}
 
-		cloneWeights(initialWeightsNetwork, gpuNetwork)
-
+		gpuNetwork.InitializeWeights()
 		// Try to enable GPU
 		gpuNetwork.GPU = true
 		err = gpuNetwork.WeightsToGPU()
@@ -764,8 +712,8 @@ func main() {
 		}
 		defer gpuNetwork.ReleaseGPUWeights()
 
-		beforeMetrics, _ = gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-		gpuResult.InitialAcc = beforeMetrics.Accuracy
+		beforeMetrics, _ = gpuNetwork.EvaluateNetwork(evalInputs, dataset.Outputs)
+		gpuResult.InitialMetrics = beforeMetrics
 
 		// Train with scaled LR
 		gpuLR := float32(*lrFlag) * 5.0
@@ -781,13 +729,12 @@ func main() {
 		gpuResult.LossHistory = lossHistory
 		gpuResult.TrainTime = trainTime
 
-		afterMetrics, _ = gpuNetwork.EvaluateNetwork(dataset.Inputs, dataset.Outputs)
-		gpuResult.FinalAcc = afterMetrics.Accuracy
+		afterMetrics, _ = gpuNetwork.EvaluateNetwork(evalInputs, dataset.Outputs)
+		gpuResult.FinalMetrics = afterMetrics
 		gpuResult.Success = true
 
 		gpuResults = append(gpuResults, gpuResult)
-		fmt.Printf("  ✓ Completed: %.1f%% → %.1f%% accuracy in %v\n",
-			gpuResult.InitialAcc*100, gpuResult.FinalAcc*100, trainTime)
+		nn.PrintDeviationComparisonTable(fmt.Sprintf("GPU Results: %s", config.Name), gpuResult.InitialMetrics, gpuResult.FinalMetrics)
 	}
 
 	// ===== Print Results =====
