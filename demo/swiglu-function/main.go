@@ -52,9 +52,21 @@ func main() {
 	}
 	cpuNet.InitializeWeights()
 
+	// Prepare targets for EvaluateNetwork
+	evalTargets := make([]float64, len(trainTargets))
+	for i, v := range trainTargets {
+		evalTargets[i] = float64(v)
+	}
+
 	startCPU := time.Now()
+	metricsBefore, _ := cpuNet.EvaluateNetwork(trainData, evalTargets)
+
 	lossCPU := trainNetwork(cpuNet, trainData, trainTargets, false)
 	timeCPU := time.Since(startCPU)
+
+	metricsAfter, _ := cpuNet.EvaluateNetwork(trainData, evalTargets)
+	nn.PrintDeviationComparisonTable("CPU Results: SwiGLU Function", metricsBefore, metricsAfter)
+
 	fmt.Printf("      CPU Training: Loss=%.6f, Time=%v\n", lossCPU, timeCPU)
 
 	// Save weights for GPU
@@ -68,9 +80,17 @@ func main() {
 	}
 	gpuNet.BatchSize = BatchSize
 
+	gpuNet.SetGPU(true)
+	gpuNet.WeightsToGPU()
+	metricsGPUBefore, _ := gpuNet.EvaluateNetwork(trainData, evalTargets)
+
 	startGPU := time.Now()
 	lossGPU := trainNetwork(gpuNet, trainData, trainTargets, true)
 	timeGPU := time.Since(startGPU)
+
+	metricsGPUAfter, _ := gpuNet.EvaluateNetwork(trainData, evalTargets)
+	nn.PrintDeviationComparisonTable("GPU Results: SwiGLU Function", metricsGPUBefore, metricsGPUAfter)
+
 	fmt.Printf("      GPU Training: Loss=%.6f, Time=%v\n", lossGPU, timeGPU)
 
 	// Performance comparison
@@ -172,18 +192,22 @@ func buildNetworkConfig() string {
 }
 
 func trainNetwork(net *nn.Network, trainData [][]float32, trainTargets []float32, useGPU bool) float64 {
-	batches := createBatches(trainData, trainTargets, BatchSize)
-
 	config := &nn.TrainingConfig{
 		Epochs:          Epochs,
 		LearningRate:    LearningRate,
 		UseGPU:          useGPU,
 		LossType:        "mse",
 		PrintEveryBatch: 0,
-		Verbose:         false,
+		Verbose:         true,
 	}
 
-	_, err := net.Train(batches, config)
+	// Prepare targets for TrainStandard (expects [][]float32)
+	trainTargetsSeq := make([][]float32, len(trainTargets))
+	for i, v := range trainTargets {
+		trainTargetsSeq[i] = []float32{v}
+	}
+
+	_, err := net.TrainStandard(trainData, trainTargetsSeq, config)
 	if err != nil {
 		fmt.Printf("Warning: Training error: %v\n", err)
 		return 999999
@@ -197,27 +221,6 @@ func trainNetwork(net *nn.Network, trainData [][]float32, trainTargets []float32
 	}
 
 	return evaluateLoss(net, trainData, trainTargets)
-}
-
-func createBatches(data [][]float32, targets []float32, batchSize int) []nn.TrainingBatch {
-	indices := rand.Perm(len(data))
-	numBatches := len(data) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*InputDim)
-		target := make([]float32, batchSize)
-
-		for i := 0; i < batchSize; i++ {
-			idx := indices[b*batchSize+i]
-			copy(input[i*InputDim:], data[idx])
-			target[i] = targets[idx]
-		}
-
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-
-	return batches
 }
 
 func evaluateLoss(net *nn.Network, data [][]float32, targets []float32) float64 {

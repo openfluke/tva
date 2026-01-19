@@ -55,8 +55,16 @@ func main() {
 	cpuNet.InitializeWeights()
 
 	startCPU := time.Now()
+	// Pre-eval
+	metricsBefore := evaluateDeviation(cpuNet, trainData, trainTargets)
+
 	lossCPU := trainNetwork(cpuNet, trainData, trainTargets, false)
 	timeCPU := time.Since(startCPU)
+
+	// Post-eval
+	metricsAfter := evaluateDeviation(cpuNet, trainData, trainTargets)
+	nn.PrintDeviationComparisonTable("CPU Results: LSTM Time Series", metricsBefore, metricsAfter)
+
 	fmt.Printf("      CPU Training: Loss=%.6f, Time=%v\n", lossCPU, timeCPU)
 
 	// Save weights for GPU
@@ -70,9 +78,19 @@ func main() {
 	}
 	gpuNet.BatchSize = BatchSize
 
+	// Pre-eval GPU
+	gpuNet.SetGPU(true)
+	gpuNet.WeightsToGPU()
+	metricsGPUBefore := evaluateDeviation(gpuNet, trainData, trainTargets)
+
 	startGPU := time.Now()
 	lossGPU := trainNetwork(gpuNet, trainData, trainTargets, true)
 	timeGPU := time.Since(startGPU)
+
+	// Post-eval GPU
+	metricsGPUAfter := evaluateDeviation(gpuNet, trainData, trainTargets)
+	nn.PrintDeviationComparisonTable("GPU Results: LSTM Time Series", metricsGPUBefore, metricsGPUAfter)
+
 	fmt.Printf("      GPU Training: Loss=%.6f, Time=%v\n", lossGPU, timeGPU)
 
 	// Performance comparison
@@ -205,18 +223,17 @@ func buildNetworkConfig() string {
 }
 
 func trainNetwork(net *nn.Network, trainData [][]float32, trainTargets [][]float32, useGPU bool) float64 {
-	batches := createBatches(trainData, trainTargets, BatchSize)
-
 	config := &nn.TrainingConfig{
 		Epochs:          Epochs,
 		LearningRate:    LearningRate,
 		UseGPU:          useGPU,
 		LossType:        "mse",
 		PrintEveryBatch: 0,
-		Verbose:         false,
+		Verbose:         true,
 	}
 
-	_, err := net.Train(batches, config)
+	// Train
+	_, err := net.TrainStandard(trainData, trainTargets, config)
 	if err != nil {
 		fmt.Printf("Warning: Training error: %v\n", err)
 		return 999999
@@ -230,27 +247,6 @@ func trainNetwork(net *nn.Network, trainData [][]float32, trainTargets [][]float
 	}
 
 	return evaluateLoss(net, trainData, trainTargets)
-}
-
-func createBatches(data [][]float32, targets [][]float32, batchSize int) []nn.TrainingBatch {
-	indices := rand.Perm(len(data))
-	numBatches := len(data) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*WindowSize)
-		target := make([]float32, batchSize*ForecastHorizon)
-
-		for i := 0; i < batchSize; i++ {
-			idx := indices[b*batchSize+i]
-			copy(input[i*WindowSize:], data[idx])
-			copy(target[i*ForecastHorizon:], targets[idx])
-		}
-
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-
-	return batches
 }
 
 func evaluateLoss(net *nn.Network, data [][]float32, targets [][]float32) float64 {
@@ -298,4 +294,25 @@ func showExampleForecasts(net *nn.Network) {
 			output[0], output[1], output[2], output[3], output[4])
 		fmt.Printf("    Avg Error: %.4f\n", avgError)
 	}
+}
+
+func evaluateDeviation(net *nn.Network, inputs, targets [][]float32) *nn.DeviationMetrics {
+	// Temporarily force batch size 1 to avoid complexity with manual batching for evaluation
+	// (or just rely on ForwardCPU handling it if inputs are single samples)
+	originalBatchSize := net.BatchSize
+	net.BatchSize = 1
+	defer func() { net.BatchSize = originalBatchSize }()
+
+	flatActual := make([]float64, 0)
+	flatExpected := make([]float64, 0)
+
+	for i, input := range inputs {
+		output, _ := net.ForwardCPU(input)
+		for j, val := range output {
+			flatActual = append(flatActual, float64(val))
+			flatExpected = append(flatExpected, float64(targets[i][j]))
+		}
+	}
+	metrics, _ := nn.EvaluateModel(flatExpected, flatActual)
+	return metrics
 }

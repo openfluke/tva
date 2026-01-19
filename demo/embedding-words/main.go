@@ -20,7 +20,7 @@ const (
 	ContextWindow = 3    // Words before/after target
 	NumSamples    = 5000 // Training pairs
 	Epochs        = 100
-	LearningRate  = 0.01
+	LearningRate  = 0.05
 	BatchSize     = 20
 )
 
@@ -46,9 +46,20 @@ func main() {
 	}
 	net.InitializeWeights()
 
+	// Prepare targets for EvaluateNetwork
+	evalTargets := make([]float64, len(trainLabels))
+	for i, v := range trainLabels {
+		evalTargets[i] = float64(v)
+	}
+
 	startCPU := time.Now()
+	metricsBefore, _ := net.EvaluateNetwork(trainData, evalTargets)
+
 	accCPU := trainNetwork(net, trainData, trainLabels)
 	timeCPU := time.Since(startCPU)
+
+	metricsAfter, _ := net.EvaluateNetwork(trainData, evalTargets)
+	nn.PrintDeviationComparisonTable("CPU Results: Embedding Words", metricsBefore, metricsAfter)
 
 	fmt.Printf("      Training complete: Accuracy=%.2f%%, Time=%v\n", accCPU*100, timeCPU)
 
@@ -142,46 +153,22 @@ func buildNetworkConfig() string {
 }
 
 func trainNetwork(net *nn.Network, trainData [][]float32, trainLabels []int) float64 {
-	batches := createBatches(trainData, trainLabels, BatchSize)
-
 	config := &nn.TrainingConfig{
 		Epochs:          Epochs,
 		LearningRate:    LearningRate,
 		UseGPU:          false, // CPU only for embedding demo
-		LossType:        "cross_entropy",
+		LossType:        "mse",
 		PrintEveryBatch: 0,
-		Verbose:         false,
+		Verbose:         true,
 	}
 
-	_, err := net.Train(batches, config)
+	_, err := net.TrainLabels(trainData, trainLabels, config)
 	if err != nil {
 		fmt.Printf("Warning: Training error: %v\n", err)
 		return 0
 	}
 
 	return evaluateAccuracy(net, trainData, trainLabels)
-}
-
-func createBatches(data [][]float32, labels []int, batchSize int) []nn.TrainingBatch {
-	indices := rand.Perm(len(data))
-	numBatches := len(data) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	contextSize := 2 * ContextWindow
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*contextSize)
-		target := make([]float32, batchSize*VocabSize)
-
-		for i := 0; i < batchSize; i++ {
-			idx := indices[b*batchSize+i]
-			copy(input[i*contextSize:], data[idx])
-			target[i*VocabSize+labels[idx]] = 1.0
-		}
-
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-
-	return batches
 }
 
 func evaluateAccuracy(net *nn.Network, data [][]float32, labels []int) float64 {

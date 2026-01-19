@@ -17,7 +17,7 @@ const (
 	NumClasses      = 4   // Sine, Square, Sawtooth, Triangle
 	SamplesPerClass = 250 // Training samples per class
 	Epochs          = 50
-	LearningRate    = 0.01
+	LearningRate    = 0.05
 	BatchSize       = 20
 )
 
@@ -52,9 +52,23 @@ func main() {
 	}
 	cpuNet.InitializeWeights()
 
+	// Prepare targets for EvaluateNetwork
+	evalTargets := make([]float64, len(trainLabels))
+	for i, v := range trainLabels {
+		evalTargets[i] = float64(v)
+	}
+
 	startCPU := time.Now()
+	// Pre-eval
+	metricsBefore, _ := cpuNet.EvaluateNetwork(trainData, evalTargets)
+
 	accCPU := trainNetwork(cpuNet, trainData, trainLabels, false)
 	timeCPU := time.Since(startCPU)
+
+	// Post-eval
+	metricsAfter, _ := cpuNet.EvaluateNetwork(trainData, evalTargets)
+	nn.PrintDeviationComparisonTable("CPU Results: Conv1D Audio", metricsBefore, metricsAfter)
+
 	fmt.Printf("      CPU Training: Accuracy=%.2f%%, Time=%v\n", accCPU*100, timeCPU)
 
 	// Save initial weights for GPU training
@@ -68,9 +82,21 @@ func main() {
 	}
 	gpuNet.BatchSize = BatchSize
 
+	// Pre-eval GPU
+	// Must set GPU true to ensure evaluation uses GPU if desired, though EvaluateNetwork might be CPU based if internally calling ForwardCPU?
+	// Verify EvaluateNetwork implementation using Forward() which dispatches based on n.GPU.
+	gpuNet.SetGPU(true)
+	gpuNet.WeightsToGPU()
+	metricsGPUBefore, _ := gpuNet.EvaluateNetwork(trainData, evalTargets)
+
 	startGPU := time.Now()
 	accGPU := trainNetwork(gpuNet, trainData, trainLabels, true)
 	timeGPU := time.Since(startGPU)
+
+	// Post-eval GPU
+	metricsGPUAfter, _ := gpuNet.EvaluateNetwork(trainData, evalTargets)
+	nn.PrintDeviationComparisonTable("GPU Results: Conv1D Audio", metricsGPUBefore, metricsGPUAfter)
+
 	fmt.Printf("      GPU Training: Accuracy=%.2f%%, Time=%v\n", accGPU*100, timeGPU)
 
 	// Performance comparison
@@ -204,20 +230,17 @@ func buildNetworkConfig() string {
 }
 
 func trainNetwork(net *nn.Network, trainData [][]float32, trainLabels []int, useGPU bool) float64 {
-	// Create batches
-	batches := createBatches(trainData, trainLabels, BatchSize)
-
 	config := &nn.TrainingConfig{
 		Epochs:          Epochs,
 		LearningRate:    LearningRate,
 		UseGPU:          useGPU,
-		LossType:        "cross_entropy",
+		LossType:        "mse",
 		PrintEveryBatch: 0,
-		Verbose:         false,
+		Verbose:         true,
 	}
 
-	// Train
-	_, err := net.Train(batches, config)
+	// TrainLabels call is below
+	_, err := net.TrainLabels(trainData, trainLabels, config)
 	if err != nil {
 		fmt.Printf("Warning: Training error: %v\n", err)
 		return 0
@@ -233,28 +256,6 @@ func trainNetwork(net *nn.Network, trainData [][]float32, trainLabels []int, use
 
 	// Evaluate
 	return evaluateAccuracy(net, trainData, trainLabels)
-}
-
-func createBatches(data [][]float32, labels []int, batchSize int) []nn.TrainingBatch {
-	// Shuffle
-	indices := rand.Perm(len(data))
-	numBatches := len(data) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*SampleRate)
-		target := make([]float32, batchSize*NumClasses)
-
-		for i := 0; i < batchSize; i++ {
-			idx := indices[b*batchSize+i]
-			copy(input[i*SampleRate:], data[idx])
-			target[i*NumClasses+labels[idx]] = 1.0
-		}
-
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-
-	return batches
 }
 
 func evaluateAccuracy(net *nn.Network, data [][]float32, labels []int) float64 {

@@ -477,99 +477,40 @@ func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRat
 	return lossHistory, totalTime, nil
 }
 
-// trainNetworkLoom adapts the verification dataset to nn.Train
+// trainNetworkLoom adapts the verification dataset to nn.Train using manual batching helper
 func trainNetworkLoom(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) ([]float32, time.Duration, error) {
-	if batchSize <= 0 {
-		batchSize = 1
+	// Prepare integer labels from dataset outputs (float64)
+	labels := make([]int, len(dataset.Outputs))
+	for i, v := range dataset.Outputs {
+		labels[i] = int(v)
 	}
 
-	numSamples := len(dataset.Inputs)
-	numBatches := numSamples / batchSize
-	if numSamples%batchSize != 0 {
-		numBatches++
-	}
-
-	batches := make([]nn.TrainingBatch, numBatches)
-	inputSize := 2 // All networks use input_height: 2
-
-	for b := 0; b < numBatches; b++ {
-		idxStart := b * batchSize
-		idxEnd := idxStart + batchSize
-		if idxEnd > numSamples {
-			idxEnd = numSamples
-		}
-		currentBatchSize := idxEnd - idxStart
-
-		// Flatten inputs and targets for this batch
-		batchInputLen := currentBatchSize * inputSize
-		batchInput := make([]float32, batchInputLen)
-		// batchTarget removed (unused)
-
-		// Check loss type used in trainNetwork. It uses:
-		// totalLoss += -float32(math.Log(float64(val))) if correct class.
-		// trainNetwork computes dOutput assuming classification (CrossEntropy-ish but manual).
-		// nn.Train uses MSE or CrossEntropy.
-		// Dataset.Outputs are float64 classes (0.0 or 1.0).
-
-		// Wait, nn.Train (and calculateMSE) expects output and target to have same dimensions?
-		// In trainNetwork:
-		// "Target... class := int(dataset.Outputs[absIdx])"
-		// "if j == class { targetVal = 1.0 }"
-		// So target is ONE-HOT encoded implicitly in trainNetwork logic!
-		// We need to ONE-HOT encode targets for nn.Train if we are using MSE or CrossEntropy on 2-element output.
-		// Dataset output is just the label (0 or 1).
-		// The network output size is 2.
-
-		batchTargetOneHot := make([]float32, currentBatchSize*2)
-
-		for i := 0; i < currentBatchSize; i++ {
-			// Input copy
-			copy(batchInput[i*inputSize:], dataset.Inputs[idxStart+i][:inputSize])
-
-			// Target One-Hot
-			class := int(dataset.Outputs[idxStart+i])
-			// Set correct index to 1.0
-			batchTargetOneHot[i*2+class] = 1.0
-		}
-
-		batches[b] = nn.TrainingBatch{
-			Input:  batchInput,
-			Target: batchTargetOneHot,
-		}
-	}
+	network.BatchSize = batchSize
 
 	config := nn.DefaultTrainingConfig()
 	config.Epochs = epochs
-	config.LearningRate = float32(learningRate)
+	config.LearningRate = learningRate // struct uses float32
 	config.UseGPU = isGPU
-	// nn.Train prints a lot. Let's make it less verbose?
-	// The original script prints: "  [CPU] Epoch 1/20 - Loss: 0.6927"
-	// config.PrintEveryBatch = 0 (only epoch summary)
-	// User might want to see the new format.
-	// But `gpu_training_verification.go` expects to return loss history to print comparison table.
-	// `result, err := network.Train(...)` returns history.
-
-	// Issue: `nn.Train` prints to stdout. `gpu_training_verification` also prints.
-	// We might have double printing.
-	// "DONT remove the func of training in the gpu training just make another func to use the looms training version to see if it works"
-	// Okay, I will suppress nn.Train verbose if I want to mimic exactly, or let it print to show it works?
-	// User said "to use the looms training version to see if it works". Seeing it print standard training output is proof.
-	// But we need the return values regardless.
-
-	// Actually, if I enable verbose, `nn.Train` prints: "\rEpoch %d/%d - Avg Loss: ..."
-	// The original script prints: "  [%s] Epoch %d/%d - Loss: %.4f"
-	// Let's try `Verbose = false` first and construct the history manually?
-	// `nn.Train` returns `TrainingResult` with `LossHistory`.
-
-	// Enable verbose to see logs from nn.Train
 	config.Verbose = true
 
-	result, err := network.Train(batches, config)
+	// Slice inputs to expected size (2) as dataset.Inputs has 4 features
+	// This prevents DenseBackward from misinterpreting extra features as batch size
+	slicedInputs := make([][]float32, len(dataset.Inputs))
+	for i, inp := range dataset.Inputs {
+		if len(inp) > 2 {
+			slicedInputs[i] = inp[:2]
+		} else {
+			slicedInputs[i] = inp
+		}
+	}
+
+	// Use the new helper to handle batching and one-hot encoding
+	result, err := network.TrainLabels(slicedInputs, labels, config)
 	if err != nil {
 		return nil, 0, err
 	}
 
-	// Convert result.LossHistory []float64 to []float32
+	// Convert result.LossHistory []float64 to []float32 for return signature compatibility
 	history32 := make([]float32, len(result.LossHistory))
 	for i, v := range result.LossHistory {
 		history32[i] = float32(v)

@@ -2528,106 +2528,35 @@ func cloneWeights(src, dst *nn.Network) {
 }
 
 func trainNetwork(network *nn.Network, dataset *Dataset, epochs int, learningRate float32, isGPU bool, batchSize int) ([]float32, time.Duration, error) {
-	name := "CPU"
-	if isGPU {
-		name = "GPU"
+	// Convert inputs to labels
+	labels := make([]int, len(dataset.Outputs))
+	for i, v := range dataset.Outputs {
+		labels[i] = int(v)
 	}
 
-	numSamples := len(dataset.Inputs)
-	inputSize := len(dataset.Inputs[0])
-	outputSize := 2
+	// Update network batch size
+	network.BatchSize = batchSize
 
-	if batchSize <= 0 {
-		batchSize = 1
-	}
-	numBatches := numSamples / batchSize
-
-	lossHistory := make([]float32, epochs)
-	startTime := time.Now()
-
-	if isGPU {
-		err := network.InitGPU()
-		if err != nil {
-			return nil, 0, fmt.Errorf("failed to init GPU: %v", err)
-		}
-		defer network.ReleaseGPU()
+	config := &nn.TrainingConfig{
+		Epochs:       epochs,
+		LearningRate: learningRate,
+		UseGPU:       isGPU,
+		LossType:     "mse",
+		Verbose:      false,
 	}
 
-	for epoch := 0; epoch < epochs; epoch++ {
-		totalLoss := float32(0.0)
-
-		for b := 0; b < numBatches; b++ {
-			// Determine batch range
-			idxStart := b * batchSize
-			idxEnd := idxStart + batchSize
-			if idxEnd > numSamples {
-				idxEnd = numSamples
-			}
-			currentBatchSize := idxEnd - idxStart
-
-			// Extract Batch Input
-			// We need a flat slice for the batch
-			batchInputLen := currentBatchSize * inputSize
-			// Optimization: could reuse buffer, but allocation is cleaner for now
-			batchInput := make([]float32, batchInputLen)
-
-			// Copy samples into batchInput
-			for i := 0; i < currentBatchSize; i++ {
-				copy(batchInput[i*inputSize:], dataset.Inputs[idxStart+i])
-			}
-
-			// Forward Pass
-			output, _ := network.Forward(batchInput)
-
-			// Compute Gradients
-			dOutput := make([]float32, len(output))
-
-			for i := 0; i < currentBatchSize; i++ {
-				// absolute index in dataset
-				absIdx := idxStart + i
-
-				// Output corresponds to batch index i
-				outStart := i * outputSize
-				sampleOut := output[outStart : outStart+outputSize]
-
-				// Target
-				class := int(dataset.Outputs[absIdx])
-
-				// Loss calculation
-				if class < len(sampleOut) {
-					val := sampleOut[class]
-					if val > 1e-7 {
-						totalLoss += -float32(math.Log(float64(val)))
-					}
-				}
-
-				// Gradient dL/dY = (Y - T) / N
-				// dOutput should be scaled by currentBatchSize
-				for j := 0; j < outputSize; j++ {
-					targetVal := 0.0
-					if j == class {
-						targetVal = 1.0
-					}
-					dOutput[outStart+j] = (sampleOut[j] - float32(targetVal)) / float32(currentBatchSize)
-				}
-			}
-
-			// Backward Pass
-			_, _ = network.Backward(dOutput)
-
-			// Apply Gradients
-			network.ApplyGradients(learningRate)
-		}
-
-		avgLoss := totalLoss / float32(numSamples)
-		lossHistory[epoch] = avgLoss
-		if epoch == 0 || epoch == epochs-1 || epoch%10 == 0 {
-			fmt.Printf("  [%s] Epoch %d/%d - Loss: %.4f\n", name, epoch+1, epochs, avgLoss)
-		}
+	result, err := network.TrainLabels(dataset.Inputs, labels, config)
+	if err != nil {
+		return nil, 0, err
 	}
 
-	totalTime := time.Since(startTime)
-	return lossHistory, totalTime, nil
+	// Convert LossHistory to float32
+	lossHistory := make([]float32, len(result.LossHistory))
+	for i, v := range result.LossHistory {
+		lossHistory[i] = float32(v)
+	}
+
+	return lossHistory, result.TotalTime, nil
 }
 
 func printEpochLossTable(results []LayerTestResult, title string, epochs int) {

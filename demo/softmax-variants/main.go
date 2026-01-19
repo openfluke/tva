@@ -45,6 +45,12 @@ func main() {
 
 	results := make([]float64, len(variants))
 
+	// Prepare targets for EvaluateNetwork
+	evalTargets := make([]float64, len(trainLabels))
+	for i, v := range trainLabels {
+		evalTargets[i] = float64(v)
+	}
+
 	for i, variant := range variants {
 		fmt.Printf("\n  Training with %s...\n", variant.name)
 		jsonConfig := buildNetworkConfig(variant.config)
@@ -54,7 +60,11 @@ func main() {
 		}
 		net.InitializeWeights()
 
+		metricsBefore, _ := net.EvaluateNetwork(trainData, evalTargets)
 		results[i] = trainNetwork(net, trainData, trainLabels)
+		metricsAfter, _ := net.EvaluateNetwork(trainData, evalTargets)
+
+		nn.PrintDeviationComparisonTable(fmt.Sprintf("Results: Softmax %s", variant.name), metricsBefore, metricsAfter)
 	}
 
 	// Comparison table
@@ -132,45 +142,22 @@ func buildNetworkConfig(softmaxConfig string) string {
 }
 
 func trainNetwork(net *nn.Network, trainData [][]float32, trainLabels []int) float64 {
-	batches := createBatches(trainData, trainLabels, BatchSize)
-
 	config := &nn.TrainingConfig{
 		Epochs:          Epochs,
 		LearningRate:    LearningRate,
 		UseGPU:          false, // CPU only for softmax demo
-		LossType:        "cross_entropy",
+		LossType:        "mse",
 		PrintEveryBatch: 0,
-		Verbose:         false,
+		Verbose:         true,
 	}
 
-	_, err := net.Train(batches, config)
+	_, err := net.TrainLabels(trainData, trainLabels, config)
 	if err != nil {
 		fmt.Printf("    Warning: Training error: %v\n", err)
 		return 0
 	}
 
 	return evaluateAccuracy(net, trainData, trainLabels)
-}
-
-func createBatches(data [][]float32, labels []int, batchSize int) []nn.TrainingBatch {
-	indices := rand.Perm(len(data))
-	numBatches := len(data) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*InputDim)
-		target := make([]float32, batchSize*NumClasses)
-
-		for i := 0; i < batchSize; i++ {
-			idx := indices[b*batchSize+i]
-			copy(input[i*InputDim:], data[idx])
-			target[i*NumClasses+labels[idx]] = 1.0
-		}
-
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-
-	return batches
 }
 
 func evaluateAccuracy(net *nn.Network, data [][]float32, labels []int) float64 {

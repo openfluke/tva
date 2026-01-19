@@ -5,7 +5,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -55,7 +54,7 @@ func main() {
 		"batch_size": 20,
 		"grid_rows": 1,
 		"grid_cols": 1,
-		"layers_per_cell": 6,
+		"layers_per_cell": 5,
 		"layers": [
 			{
 				"type": "dense", "activation": "none",
@@ -78,18 +77,21 @@ func main() {
 				"input_height": 2304, "output_height": 64
 			},
 			{
-				"type": "dense", "activation": "none",
+				"type": "dense", "activation": "sigmoid",
 				"input_height": 64, "output_height": 10
-			},
-			{
-				"type": "softmax", "activation": "none",
-				"input_height": 10
 			}
 		]
 	}`
 
 	batchSize := 20
-	trainBatches := createBatches(trainData, batchSize)
+
+	// Prepare training data for new generic TrainLabels
+	trainInputs := make([][]float32, len(trainData))
+	trainLabels := make([]int, len(trainData))
+	for i, s := range trainData {
+		trainInputs[i] = s.Image
+		trainLabels[i] = s.Label
+	}
 
 	valInputs := make([][]float32, len(testData))
 	valTargets := make([]float64, len(testData))
@@ -115,19 +117,22 @@ func main() {
 
 	cpuConfig := &nn.TrainingConfig{
 		Epochs:          Epochs, // Reduced for speed in validation test
-		LearningRate:    0.01,
+		LearningRate:    0.05,
 		UseGPU:          false,
-		LossType:        "cross_entropy",
-		PrintEveryBatch: 1,
+		LossType:        "mse",
+		PrintEveryBatch: 0,
 		Verbose:         true,
 	}
 
-	cpuNet.Train(trainBatches, cpuConfig)
+	cpuNet.TrainLabels(trainInputs, trainLabels, cpuConfig)
 
 	// Evaluate after CPU training
 	fmt.Println("\n--- Post-Training CPU Evaluation ---")
-	metricAfter, err := cpuNet.EvaluateNetwork(valInputs, valTargets)
-	metricAfter.PrintSummary()
+	metricsAfter, err := cpuNet.EvaluateNetwork(valInputs, valTargets)
+	metricsAfter.PrintSummary()
+
+	// Show Deviation Comparison
+	nn.PrintDeviationComparisonTable("CPU Results: MNIST", metricsBefore, metricsAfter)
 
 	// Save CPU model (JSON)
 	fmt.Println("Saving CPU model (JSON)...")
@@ -149,9 +154,9 @@ func main() {
 
 	gpuConfig := &nn.TrainingConfig{
 		Epochs:          Epochs,
-		LearningRate:    0.01,
+		LearningRate:    0.05,
 		UseGPU:          true,
-		LossType:        "cross_entropy",
+		LossType:        "mse",
 		PrintEveryBatch: 0,
 		Verbose:         true,
 	}
@@ -166,7 +171,7 @@ func main() {
 	metricsGPUBefore.PrintSummary()
 
 	// Train GPU
-	if _, err := gpuNet.Train(trainBatches, gpuConfig); err != nil {
+	if _, err := gpuNet.TrainLabels(trainInputs, trainLabels, gpuConfig); err != nil {
 		panic(err)
 	}
 
@@ -174,6 +179,9 @@ func main() {
 	fmt.Println("\n--- Post-Training GPU Evaluation ---")
 	metricsGPUAfter, err := gpuNet.EvaluateNetwork(valInputs, valTargets)
 	metricsGPUAfter.PrintSummary()
+
+	// Show Deviation Comparison
+	nn.PrintDeviationComparisonTable("GPU Results: MNIST", metricsGPUBefore, metricsGPUAfter)
 
 	// Sync Weights back to CPU for saving
 	fmt.Println("Syncing GPU weights to CPU...")
@@ -287,34 +295,6 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.2f %cB", float64(b)/float64(div), "KMGTPE"[exp])
-}
-
-func createBatches(data []MNISTSample, batchSize int) []nn.TrainingBatch {
-	// Simple batch creation without shuffle for deterministic debugging if needed
-	// But training needs shuffle. We'll use random shuffle.
-	rand.Seed(123) // Fixed seed
-	shuffled := make([]MNISTSample, len(data))
-	copy(shuffled, data)
-	rand.Shuffle(len(shuffled), func(i, j int) {
-		shuffled[i], shuffled[j] = shuffled[j], shuffled[i]
-	})
-
-	numBatches := len(shuffled) / batchSize
-	batches := make([]nn.TrainingBatch, numBatches)
-
-	for b := 0; b < numBatches; b++ {
-		input := make([]float32, batchSize*784)
-		target := make([]float32, batchSize*10)
-
-		for i := 0; i < batchSize; i++ {
-			idx := b*batchSize + i
-			sample := shuffled[idx]
-			copy(input[i*784:], sample.Image)
-			target[i*10+sample.Label] = 1.0
-		}
-		batches[b] = nn.TrainingBatch{Input: input, Target: target}
-	}
-	return batches
 }
 
 func ensureData() error {
