@@ -19,7 +19,7 @@ const (
 	MnistTestImagesFile  = "t10k-images-idx3-ubyte"
 	MnistTestLabelsFile  = "t10k-labels-idx1-ubyte"
 	DataDir              = "data"
-	Epochs               = 20
+	Epochs               = 5
 )
 
 type MNISTSample struct {
@@ -241,11 +241,11 @@ func main() {
 	}
 	scales := []float32{
 		// Float scales
-		1.0, 1.0, 1.0, 1.0, 8.0,
+		1.0, 1.0, 1.0, 1.0, 2.0,
 		// Signed int scales
 		1000000.0, 1000000.0, 1000.0, 100.0,
 		// Unsigned int scales
-		1000000.0, 1000000.0, 1000.0, 100.0,
+		1.0, 1.0, 1.0, 1.0,
 	}
 
 	// Prepare benchmark inputs (use 100 test samples)
