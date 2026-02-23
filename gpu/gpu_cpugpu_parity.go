@@ -325,6 +325,9 @@ func main() {
 		},
 		{
 			Name: "Combined_Hybrid",
+			// All 9 layer types with consistent 512-element pipeline.
+			// Old failure: SwiGLU(input=64) outputs 64 not 512 → downstream layers saw wrong sizes.
+			// Fix: input_height=512 so SwiGLU outputs 512 consistently.
 			JSONConfig: `{
 				"id": "gpu_test_combined",
 				"batch_size": 1,
@@ -332,18 +335,18 @@ func main() {
 				"grid_cols": 1,
 				"layers_per_cell": 9,
 				"layers": [
-					{"type": "dense", "activation": "leaky_relu", "input_height": 64, "output_height": 64},
-					{"type": "swiglu", "input_height": 64, "output_height": 512},
+					{"type": "dense", "activation": "leaky_relu", "input_height": 512, "output_height": 512},
+					{"type": "swiglu", "input_height": 512, "output_height": 512},
 					{"type": "layer_norm", "norm_size": 512, "epsilon": 1e-5},
 					{"type": "conv1d", "input_channels": 64, "filters": 64, "kernel_size": 3, "stride": 1, "padding": 1, "input_length": 8},
 					{"type": "rnn", "input_size": 64, "hidden_size": 64, "seq_length": 8},
 					{"type": "lstm", "input_size": 64, "hidden_size": 64, "seq_length": 8},
 					{"type": "multi_head_attention", "d_model": 64, "num_heads": 8, "seq_length": 8},
-					{"type": "rms_norm", "norm_size": 64, "epsilon": 1e-5},
+					{"type": "rms_norm", "norm_size": 512, "epsilon": 1e-5},
 					{"type": "dense", "activation": "sigmoid", "input_height": 512, "output_height": 2}
 				]
 			}`,
-			InputSize: 64,
+			InputSize: 512,
 		},
 	}
 
