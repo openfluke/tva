@@ -17,8 +17,8 @@ var gpuFlag = flag.String("gpu", "", "Optional substring to select a specific GP
 var filterFlag = flag.String("filter", "", "Optional substring to run specific tests only")
 
 // =============================================================================
-// LOOM v0.0.8 Complete Test Suite
-// Tests all v0.0.8 features + multi-precision save/load for all layer types
+// LOOM v0.0.9 Complete Test Suite
+// Tests all v0.0.9 features + multi-precision save/load for all layer types
 // =============================================================================
 
 type SectionResult struct {
@@ -30,7 +30,7 @@ type SectionResult struct {
 func main() {
 	flag.Parse()
 	fmt.Println("╔══════════════════════════════════════════════════════════════════════╗")
-	fmt.Println("║               LOOM v0.0.8 Complete Feature Test Suite               ║")
+	fmt.Println("║               LOOM v0.0.9 Complete Feature Test Suite               ║")
 	fmt.Println("╚══════════════════════════════════════════════════════════════════════╝")
 	fmt.Println()
 
@@ -39,7 +39,7 @@ func main() {
 	var totalPassed, totalFailed int
 
 	// =========================================================================
-	// PART 1: Core v0.0.8 Feature Tests
+	// PART 1: Core v0.0.9 Feature Tests
 	// =========================================================================
 	fmt.Println("═══════════════════════════════════════════════════════════════════════")
 	fmt.Println("                     PART 1: CORE FEATURE TESTS                        ")
@@ -241,7 +241,7 @@ func main() {
 			}
 		}
 	} else {
-		fmt.Println("\n🎉 All tests passed! Ready for 0.0.8 release!")
+		fmt.Println("\n🎉 All tests passed! Ready for 0.0.9 release!")
 	}
 }
 
@@ -2496,7 +2496,7 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 				{"type": "conv1d", "activation": "relu", "input_channels": %d, "filters": %d, "kernel_size": 3, "padding": 1, "input_length": %d},
 				{"type": "rnn", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
 				{"type": "lstm", "activation": "tanh", "input_size": %d, "hidden_size": %d, "seq_length": %d},
-				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": 1},
+				{"type": "multi_head_attention", "d_model": %d, "num_heads": 4, "seq_length": %d},
 				{"type": "rmsnorm", "norm_size": %d, "epsilon": 1e-5},
 				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
 			]
@@ -2507,8 +2507,8 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 			hidden, hidden, seqLen,
 			hidden, hidden, seqLen,
 			hidden, hidden, seqLen,
+			hidden, seqLen,
 			hidden,
-			hidden*seqLen,
 			hidden*seqLen)
 
 	default:
