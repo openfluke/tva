@@ -19,17 +19,18 @@ import (
 )
 
 var (
-	network      *nn.Network
-	embeddings   []float32
-	lmHead       []float32
-	finalNorm    []float32
-	hiddenSize   int
-	vocabSize    int
-	eosTokens    []int
-	hasFinalNorm bool
-	tk           *tokenizer.Tokenizer
-	useKVCache   bool
-	kvCacheWarn  bool
+	network       *nn.Network
+	embeddings    []float32
+	lmHead        []float32
+	finalNorm     []float32
+	hiddenSize    int
+	vocabSize     int
+	eosTokens     []int
+	hasFinalNorm  bool
+	tk            *tokenizer.Tokenizer
+	useKVCache    bool
+	kvCacheWarn   bool
+	deterministic bool
 )
 
 type Turn struct {
@@ -50,7 +51,6 @@ Current Emotion: EXTREMELY HAPPY and EXCITED.
 You misunderstand insults as compliments.
 Be short, cute, and enthusiastic.
 `) + "\n\n"
-
 
 var chatTurns []Turn
 
@@ -84,16 +84,27 @@ func main() {
 	for i, model := range models {
 		fmt.Printf("  [%d] %s\n", i+1, model)
 	}
-	fmt.Print("\nSelect model number: ")
 
 	reader := bufio.NewReader(os.Stdin)
-	rand.Seed(time.Now().UnixNano())
-	input, _ := reader.ReadString('\n')
-	input = strings.TrimSpace(input)
+	modelInput := readInput(reader, "\nSelect model number: ", "1")
+	modelInput = strings.TrimSpace(modelInput)
 
 	var selectedIdx int
-	if _, err := fmt.Sscanf(input, "%d", &selectedIdx); err != nil || selectedIdx < 1 || selectedIdx > len(models) {
-		log.Fatalf("Invalid selection")
+	if _, err := fmt.Sscanf(modelInput, "%d", &selectedIdx); err != nil || selectedIdx < 1 || selectedIdx > len(models) {
+		log.Fatalf("Invalid selection: %v", modelInput)
+	}
+
+	// Deterministic mode selection
+	deterministic = true
+	detChoice := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
+	if detChoice == "0" {
+		deterministic = false
+	}
+
+	if deterministic {
+		rand.Seed(42) // Fixed seed for determinism
+	} else {
+		rand.Seed(time.Now().UnixNano())
 	}
 
 	modelName := models[selectedIdx-1]
@@ -132,30 +143,18 @@ func main() {
 
 	fmt.Println("ℹ️  Using ChatML prompt builder")
 
-
-	// Helper to read simple input
-	readInput := func(prompt string, Default string) string {
-		fmt.Print(prompt)
-		txt, _ := reader.ReadString('\n')
-		txt = strings.TrimSpace(txt)
-		if txt == "" {
-			return Default
-		}
-		return txt
-	}
-
 	// GPU Selection
 	useGPU := false
-	gpuChoice := readInput("\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
+	gpuChoice := readInput(reader, "\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
 	if gpuChoice == "1" {
 		useGPU = true
 		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
 	}
-	kvChoice := readInput("🧠 Use KV cache? (1=yes / 0=no) [0]: ", "0")
+	kvChoice := readInput(reader, "🧠 Use KV cache? (1=yes / 0=no) [0]: ", "0")
 	if kvChoice == "1" {
 		useKVCache = true
 	}
-	maxTokensInput := readInput("🧮 Max tokens per response [50]: ", "50")
+	maxTokensInput := readInput(reader, "🧮 Max tokens per response [50]: ", "50")
 	if _, err := fmt.Sscanf(maxTokensInput, "%d", &maxTokens); err != nil || maxTokens <= 0 {
 		maxTokens = 50
 	}
@@ -487,7 +486,6 @@ func buildChatPrompt(turns []Turn, userMsg string) string {
 	return sb.String()
 }
 
-
 // Ensures prompt_len + maxTokens fits into maxSeqLen (important for KV cache path)
 func buildPromptThatFits(userMsg string) (string, error) {
 	turns := chatTurns
@@ -538,7 +536,6 @@ func ensureSeqLenForPrompt(promptTokens int) {
 		}
 	}
 }
-
 
 func generateWithKV(tokens []int) string {
 	if len(tokens) > maxSeqLen {
@@ -669,13 +666,29 @@ func generateNextToken(tokens []int) (int, error) {
 	}
 
 	applyRepetitionPenalty(logits, recentTokens(tokens), repetitionPenalty)
-	next := sampleTopK(logits, 40, 0.9)
+
+	// Use greedy if temperature is effectively 0, else sample
+	var next int
+	if deterministic {
+		next = sampleTopK(logits, 1, 0) // Greedily pick top 1
+	} else {
+		next = sampleTopK(logits, 40, 0.9)
+	}
 	return next, nil
 }
 
 func sampleTopK(logits []float32, topK int, temperature float32) int {
-	if temperature <= 0 {
-		temperature = 1
+	// If topK is 1 or temperature is 0, do greedy decoding (pick absolute max)
+	if topK == 1 || temperature <= 0 {
+		maxIdx := 0
+		maxVal := logits[0]
+		for i, v := range logits {
+			if v > maxVal {
+				maxVal = v
+				maxIdx = i
+			}
+		}
+		return maxIdx
 	}
 
 	type pair struct {
@@ -711,11 +724,11 @@ func sampleTopK(logits []float32, topK int, temperature float32) int {
 }
 
 type kvCacheLayer struct {
-	K         []float32
-	V         []float32
-	MaxSeq    int
+	K          []float32
+	V          []float32
+	MaxSeq     int
 	NumKVHeads int
-	HeadDim   int
+	HeadDim    int
 }
 
 type kvCacheState struct {
@@ -968,6 +981,10 @@ func nextTokenFromHidden(hidden []float32, recent []int) (int, error) {
 	}
 
 	applyRepetitionPenalty(logits, recent, repetitionPenalty)
+
+	if deterministic {
+		return sampleTopK(logits, 1, 0), nil
+	}
 	return sampleTopK(logits, 40, 0.9), nil
 }
 
@@ -1072,4 +1089,14 @@ func intsToU32(xs []int) []uint32 {
 		out[i] = uint32(v)
 	}
 	return out
+}
+
+func readInput(reader *bufio.Reader, prompt string, Default string) string {
+	fmt.Print(prompt)
+	txt, _ := reader.ReadString('\n')
+	txt = strings.TrimSpace(txt)
+	if txt == "" {
+		return Default
+	}
+	return txt
 }
