@@ -134,7 +134,7 @@ func main() {
 	if gpuChoice == "1" {
 		useGPU = true
 		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
-		gpu.SetDebug(true)
+		//gpu.SetDebug(true)
 	}
 
 	useKVCache := true
