@@ -22,9 +22,8 @@ var (
 	eosTokens     []int
 	chatTurns     []tokenizer.Turn
 	deterministic bool
-	useKVCache    bool
 	maxTokens     = 50
-	maxSeqLen     = 128
+	maxSeqLen     = 2048
 )
 
 const minPromptRoom = 32
@@ -130,16 +129,18 @@ func main() {
 
 	fmt.Println("ℹ️  Using ChatML prompt builder")
 
-	// GPU Selection
 	useGPU := false
 	gpuChoice := readInput(reader, "\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
 	if gpuChoice == "1" {
 		useGPU = true
 		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
+		gpu.SetDebug(true)
 	}
-	kvChoice := readInput(reader, "🧠 Use KV cache? (1=yes / 0=no) [0]: ", "0")
-	if kvChoice == "1" {
-		useKVCache = true
+
+	useKVCache := true
+	kvChoice := readInput(reader, "🚀 Enable KV Cache Optimization? (1=yes / 0=no) [1]: ", "1")
+	if kvChoice == "0" {
+		useKVCache = false
 	}
 	maxTokensInput := readInput(reader, "🧮 Max tokens per response [50]: ", "50")
 	if _, err := fmt.Sscanf(maxTokensInput, "%d", &maxTokens); err != nil || maxTokens <= 0 {
@@ -172,11 +173,12 @@ func main() {
 	// Mount to GPU if requested
 	if useGPU {
 		fmt.Println("⚡ Mounting weights to GPU...")
-		network.BatchSize = maxSeqLen
+		network.BatchSize = 1 // Inference batch size
 		for i := range network.Layers {
 			network.Layers[i].SeqLength = maxSeqLen
 		}
 		network.GPU = true
+		network.EnableGPUResiduals = true // Enable transformer skip-connections on GPU
 		if err := network.WeightsToGPU(); err != nil {
 			fmt.Printf("⚠️ Failed to mount GPU: %v. Falling back to CPU.\n", err)
 			network.GPU = false
