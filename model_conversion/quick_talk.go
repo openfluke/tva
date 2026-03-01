@@ -160,11 +160,21 @@ func main() {
 		log.Fatalf("Error loading model: %v", err)
 	}
 
-	// Dynamic weight mapping
-	weightsPath := filepath.Join(snapshotDir, "model.safetensors")
-	tensors, err := nn.LoadSafetensors(weightsPath)
-	if err != nil {
-		log.Fatalf("Error loading weights: %v", err)
+	// Dynamic weight mapping - load all safetensors files
+	safetensorFiles, err := filepath.Glob(filepath.Join(snapshotDir, "*.safetensors"))
+	if err != nil || len(safetensorFiles) == 0 {
+		log.Fatalf("No .safetensors files found in %s", snapshotDir)
+	}
+
+	tensors := make(map[string][]float32)
+	for _, f := range safetensorFiles {
+		t, err := nn.LoadSafetensors(f)
+		if err != nil {
+			log.Fatalf("Error loading weights from %s: %v", filepath.Base(f), err)
+		}
+		for k, v := range t {
+			tensors[k] = v
+		}
 	}
 
 	mapper := tokenizer.NewWeightMapper()
