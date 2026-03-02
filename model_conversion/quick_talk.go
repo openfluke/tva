@@ -23,7 +23,7 @@ var (
 	chatTurns     []tokenizer.Turn
 	deterministic bool
 	maxTokens     = 50
-	maxSeqLen     = 2048
+	maxSeqLen     = 512
 )
 
 const minPromptRoom = 32
@@ -133,7 +133,9 @@ func main() {
 	gpuChoice := readInput(reader, "\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
 	if gpuChoice == "1" {
 		useGPU = true
-		gpu.SetAdapterPreference("nvidia") // Default to NVIDIA if requested
+		// Prefer discrete NVIDIA on systems where software adapters (e.g. WARP)
+		// might otherwise be selected by generic enumeration/scoring.
+		gpu.SetAdapterPreference("nvidia")
 		//gpu.SetDebug(true)
 	}
 
@@ -188,6 +190,7 @@ func main() {
 			network.Layers[i].SeqLength = maxSeqLen
 		}
 		network.GPU = true
+		network.GPUInferenceOnly = true // Avoid backward/gradient GPU allocations in chat inference
 		network.EnableGPUResiduals = true // Enable transformer skip-connections on GPU
 		if err := network.WeightsToGPU(); err != nil {
 			fmt.Printf("⚠️ Failed to mount GPU: %v. Falling back to CPU.\n", err)
