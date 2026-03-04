@@ -34,6 +34,7 @@ var (
 	network       *nn.Network
 	fp4Weights    map[int]*nn.FP4LayerWeights
 	gpuMounted    bool
+	gpuLMHead     *gpu.GPULMHead // GPU-side RMSNorm + vocab projection
 	embeddings    []float32
 	lmHead        []float32
 	finalNorm     []float32
@@ -210,6 +211,21 @@ func main() {
 		} else {
 			gpuMounted = true
 			fmt.Println("done ✓")
+			// Mount LM head on GPU — eliminates the biggest per-token CPU bottleneck
+			if gpuCtx, err2 := gpu.GetContext(); err2 == nil {
+				var normGamma []float32
+				if finalNormConf != nil {
+					normGamma = finalNormConf.Gamma
+				}
+				if lmh, err3 := gpu.NewGPULMHead(gpuCtx, hiddenSize, vocabSize, normGamma, lmHead); err3 == nil {
+					gpuLMHead = lmh
+					fmt.Printf("   GPU LM head: %d×%d → %.1f MB VRAM\n",
+						vocabSize, hiddenSize,
+						float64(vocabSize*hiddenSize*4)/(1024*1024))
+				} else {
+					fmt.Printf("   ⚠️  GPU LM head failed (%v) — using CPU fallback\n", err3)
+				}
+			}
 		}
 	}
 
@@ -296,7 +312,14 @@ func generateFP4(
 	genCount := 0
 
 	for i := 0; i < maxTokens; i++ {
-		logits := applyLMHead(hidden)
+		var logits []float32
+		if gpuLMHead != nil {
+			gpuCtx, _ := gpu.GetContext()
+			logits, _ = gpuLMHead.Infer(gpuCtx, hidden)
+		}
+		if logits == nil {
+			logits = applyLMHead(hidden)
+		}
 		applyRepetitionPenalty(logits, tokens)
 		var nextToken int
 		if deterministic {
