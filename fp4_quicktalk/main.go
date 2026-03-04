@@ -2,12 +2,11 @@ package main
 
 // fp4_quicktalk — SmolLM2-compatible chat demo using NVFP4 E2M1 inference.
 //
-// All Dense and SwiGLU projection weights are pre-quantised to 4-bit E2M1
-// at load time.  Every forward pass then uses the bitwise multiply-accumulate
-// path in nn.ForwardFP4CPU instead of the normal float32 path.
+// Dense and SwiGLU projection weights are pre-quantised to 4-bit E2M1 at
+// load time.  Inference uses ForwardFP4CPU (CPU) or network.Forward (WebGPU)
+// depending on whether GPU mode is requested.
 //
-// Usage: same as model_conversion/quick_talk.go — just run it and it will
-// discover your HuggingFace cache automatically.
+// Run: go run main.go
 
 import (
 	"bufio"
@@ -22,6 +21,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/openfluke/loom/gpu"
 	"github.com/openfluke/loom/nn"
 	"github.com/openfluke/loom/tokenizer"
 )
@@ -33,6 +33,7 @@ import (
 var (
 	network       *nn.Network
 	fp4Weights    map[int]*nn.FP4LayerWeights
+	gpuMounted    bool
 	embeddings    []float32
 	lmHead        []float32
 	finalNorm     []float32
@@ -64,7 +65,6 @@ Be witty, brief, and a little glitchy.
 // ─────────────────────────────────────────────────────────────────────────────
 
 func main() {
-	// Discover HuggingFace models
 	homeDir, _ := os.UserHomeDir()
 	hubDir := filepath.Join(homeDir, ".cache", "huggingface", "hub")
 
@@ -120,11 +120,10 @@ func main() {
 		maxSeqLen = maxTokens + minPromptRoom
 	}
 
-	// Locate snapshot dir
 	snapshotDir := findSnapshot(hubDir, modelName)
 	fmt.Printf("\n📦 Loading: %s\n   Path: %s\n", modelName, snapshotDir)
 
-	// Load tokenizer
+	// Tokenizer
 	tokenizerPath := filepath.Join(snapshotDir, "tokenizer.json")
 	if _, err := os.Stat(tokenizerPath); os.IsNotExist(err) {
 		log.Fatalf("tokenizer.json not found in %s", snapshotDir)
@@ -141,13 +140,13 @@ func main() {
 	}
 	fmt.Printf("✓ EOS tokens: %v\n", eosTokens)
 
-	// Load network
+	// Network
 	network, err = nn.LoadTransformerFromSafetensors(snapshotDir)
 	if err != nil {
 		log.Fatalf("Error loading model: %v", err)
 	}
 
-	// Load safetensors weights
+	// Safetensors weights
 	stFiles, err := filepath.Glob(filepath.Join(snapshotDir, "*.safetensors"))
 	if err != nil || len(stFiles) == 0 {
 		log.Fatalf("No .safetensors files found in %s", snapshotDir)
@@ -162,7 +161,6 @@ func main() {
 			tensors[k] = v
 		}
 	}
-
 	mapper := tokenizer.NewWeightMapper()
 	embeddings, lmHead, finalNorm, _ = mapper.MapWeights(tensors)
 
@@ -176,10 +174,9 @@ func main() {
 			Epsilon:  1e-6,
 		}
 	}
-
 	fmt.Printf("✓ Model: hidden=%d vocab=%d layers=%d\n", hiddenSize, vocabSize, len(network.Layers))
 
-	// ── Pre-quantise Dense + SwiGLU weights to FP4 ───────────────────────────
+	// ── Pre-quantise Dense + SwiGLU to FP4 ───────────────────────────────────
 	fmt.Print("⚡ Quantising weights to FP4 E2M1... ")
 	t0 := time.Now()
 	fp4Weights = network.BuildFP4Weights()
@@ -193,37 +190,57 @@ func main() {
 			swigluFP4++
 		}
 	}
-	fmt.Printf("done in %v\n", elapsed.Round(time.Millisecond))
-	fmt.Printf("   Dense layers FP4: %d  │  SwiGLU layers FP4: %d\n", denseFP4, swigluFP4)
-	fmt.Printf("   Total FP4 layers: %d / %d\n", len(fp4Weights), len(network.Layers))
+	fmt.Printf("done in %v  (Dense=%d SwiGLU=%d)\n", elapsed.Round(time.Millisecond), denseFP4, swigluFP4)
 
-	// ── Interactive chat loop ─────────────────────────────────────────────────
+	// ── GPU (optional) ────────────────────────────────────────────────────────
+	gpuChoice := readInput(reader, "\n🚀 Run on GPU? (1=yes / 0=no) [0]: ", "0")
+	if gpuChoice == "1" {
+		gpu.SetAdapterPreference("nvidia")
+		fmt.Print("⚡ Mounting FP4-compressed weights to GPU... ")
+		network.BatchSize = 1
+		for i := range network.Layers {
+			network.Layers[i].SeqLength = maxSeqLen
+		}
+		network.GPU = true
+		network.GPUInferenceOnly = true
+		network.EnableGPUResiduals = true
+		if err := network.WeightsFP4ToGPU(fp4Weights); err != nil {
+			fmt.Printf("\n⚠️  FP4 GPU mount failed (%v) — falling back to FP4 CPU\n", err)
+			network.GPU = false
+		} else {
+			gpuMounted = true
+			fmt.Println("done ✓")
+		}
+	}
+
+	// ── Chat loop ─────────────────────────────────────────────────────────────
 	var chatTurns []tokenizer.Turn
-	template := tokenizer.ChatML
+	tmpl := tokenizer.ChatML
 
 	fmt.Println("\n🤖  FP4 Chat mode")
+	if gpuMounted {
+		fmt.Println("   Backend: WebGPU  (FP4 CPU precomputed as weights fallback)")
+	} else {
+		fmt.Printf("   Backend: FP4 E2M1 CPU  (Dense=%d SwiGLU=%d layers)\n", denseFP4, swigluFP4)
+	}
 	fmt.Println("   Type 'exit' or 'quit' to stop")
-	fmt.Printf("   Max %d tokens/response  │  deterministic=%v\n\n", maxTokens, deterministic)
+	fmt.Printf("   Max %d tokens  │  deterministic=%v\n\n", maxTokens, deterministic)
 
 	for {
 		userMsg, quitting := readMessage(reader)
-		if quitting || strings.TrimSpace(userMsg) == "" {
-			if quitting {
-				fmt.Println("Goodbye!")
-				break
-			}
+		if quitting {
+			fmt.Println("Goodbye!")
+			break
+		}
+		if strings.TrimSpace(userMsg) == "" {
 			continue
 		}
 		userMsg = strings.TrimSpace(userMsg)
 
 		fmt.Print("Bot: ")
-		startGen := time.Now()
-		reply := generateFP4(template, tk, chatTurns, systemPrompt, userMsg)
-		genTime := time.Since(startGen)
+		reply := generateFP4(tmpl, tk, chatTurns, systemPrompt, userMsg)
 		fmt.Println()
-
 		chatTurns = append(chatTurns, tokenizer.Turn{User: userMsg, Assistant: reply})
-		_ = genTime
 	}
 }
 
@@ -232,15 +249,37 @@ func main() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 func generateFP4(
-	template tokenizer.Template,
+	tmpl tokenizer.Template,
 	tk *tokenizer.Tokenizer,
 	turns []tokenizer.Turn,
 	sysPrompt, userMsg string,
 ) string {
-	prompt := template.BuildPrompt(turns, sysPrompt, userMsg)
+	prompt := tmpl.BuildPrompt(turns, sysPrompt, userMsg)
 	tokens := tk.Encode(prompt, false)
-
 	stream := tokenizer.NewStreamer(tk, tokens)
+
+	// Unified forward — FP4 GPU or FP4 CPU, transparent to the caller.
+	forward := func(input []float32, pos int) []float32 {
+		for j := range network.Layers {
+			if network.Layers[j].Type == nn.LayerMultiHeadAttention {
+				network.Layers[j].IsInference = true
+				network.Layers[j].KVCachePos = pos
+			}
+		}
+		if gpuMounted {
+			out, _ := network.ForwardFP4GPU(input)
+			return out
+		}
+		out, _ := network.ForwardFP4CPU(input, fp4Weights)
+		return out
+	}
+
+	lastHidden := func(out []float32) []float32 {
+		if len(out) >= hiddenSize {
+			return append([]float32(nil), out[len(out)-hiddenSize:]...)
+		}
+		return out
+	}
 
 	// Prefill
 	var hidden []float32
@@ -249,18 +288,7 @@ func generateFP4(
 		for i, tok := range tokens {
 			copy(allEmbeds[i*hiddenSize:], getEmbedding(int(tok)))
 		}
-		for i := range network.Layers {
-			if network.Layers[i].Type == nn.LayerMultiHeadAttention {
-				network.Layers[i].IsInference = true
-				network.Layers[i].KVCachePos = 0
-			}
-		}
-		out, _ := network.ForwardFP4CPU(allEmbeds, fp4Weights)
-		if len(out) >= hiddenSize {
-			hidden = append([]float32(nil), out[len(out)-hiddenSize:]...)
-		} else {
-			hidden = out
-		}
+		hidden = lastHidden(forward(allEmbeds, 0))
 	}
 
 	// Decode
@@ -270,46 +298,36 @@ func generateFP4(
 	for i := 0; i < maxTokens; i++ {
 		logits := applyLMHead(hidden)
 		applyRepetitionPenalty(logits, tokens)
-		nextToken := sampleTopK(logits, 40, 0.9)
+		var nextToken int
 		if deterministic {
 			nextToken = argmax(logits)
+		} else {
+			nextToken = sampleTopK(logits, 40, 0.9)
 		}
 		tokens = append(tokens, uint32(nextToken))
 		genCount++
-
 		stream.Push(tokens)
 
 		if isEOS(nextToken) || stream.HasNewUserTurn(tokens) {
 			break
 		}
-
-		// Next token forward
-		for j := range network.Layers {
-			if network.Layers[j].Type == nn.LayerMultiHeadAttention {
-				network.Layers[j].IsInference = true
-				network.Layers[j].KVCachePos = len(tokens) - 1
-			}
-		}
-		input := getEmbedding(nextToken)
-		out, _ := network.ForwardFP4CPU(input, fp4Weights)
-		if len(out) >= hiddenSize {
-			hidden = append(hidden[:0], out[len(out)-hiddenSize:]...)
-		} else {
-			hidden = append(hidden[:0], out...)
-		}
+		hidden = lastHidden(forward(getEmbedding(nextToken), len(tokens)-1))
 	}
 
 	elapsed := time.Since(genStart)
-	if genCount > 0 {
-		fmt.Printf("\n\n(%.2f tokens/s | %d tokens | FP4 E2M1)\n",
-			float64(genCount)/elapsed.Seconds(), genCount)
+	backend := "FP4 E2M1 CPU"
+	if gpuMounted {
+		backend = "WebGPU + FP4 E2M1 weights"
 	}
-
+	if genCount > 0 {
+		fmt.Printf("\n\n(%.2f tokens/s | %d tokens | %s)\n",
+			float64(genCount)/elapsed.Seconds(), genCount, backend)
+	}
 	return stream.String()
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Helpers
+// Inference helpers
 // ─────────────────────────────────────────────────────────────────────────────
 
 func getEmbedding(tokenID int) []float32 {
@@ -321,7 +339,6 @@ func getEmbedding(tokenID int) []float32 {
 }
 
 func applyLMHead(hidden []float32) []float32 {
-	// Optional final RMSNorm
 	norm := hidden
 	if finalNormConf != nil {
 		norm = nn.RmsNormForwardCPU(hidden, nil, finalNormConf, 1)
