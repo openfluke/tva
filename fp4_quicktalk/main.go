@@ -226,6 +226,11 @@ func main() {
 					fmt.Printf("   ⚠️  GPU LM head failed (%v) — using CPU fallback\n", err3)
 				}
 			}
+
+			vramChoice := readInput(reader, "📊 Print GPU VRAM usage profile? (1=yes / 0=no) [0]: ", "0")
+			if vramChoice == "1" {
+				gpu.PrintVRAMUsage()
+			}
 		}
 	}
 
@@ -252,6 +257,11 @@ func main() {
 			continue
 		}
 		userMsg = strings.TrimSpace(userMsg)
+
+		if strings.ToLower(userMsg) == "vram" {
+			gpu.PrintVRAMUsage()
+			continue
+		}
 
 		fmt.Print("Bot: ")
 		reply := generateFP4(tmpl, tk, chatTurns, systemPrompt, userMsg)
