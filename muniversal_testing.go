@@ -107,6 +107,7 @@ func main() {
 			testIntrospection,
 			testStepTween,
 			testConv1DLayer,
+			testConv3DLayer,
 			testResidualConnection,
 			testEnsembleFeatures,
 			testObserverPattern,
@@ -786,6 +787,42 @@ func testConv1DLayer() bool {
 	fmt.Printf("  ✓ Output: [%.3f, %.3f, %.3f, %.3f]\n", output[0], output[1], output[2], output[3])
 
 	fmt.Println("  ✅ PASSED: Conv1D Layer")
+	return true
+}
+
+func testConv3DLayer() bool {
+	fmt.Println("\n┌──────────────────────────────────────────────────────────────────────┐")
+	fmt.Println("│ Conv3D Layer (conv3d.go)                                            │")
+	fmt.Println("└──────────────────────────────────────────────────────────────────────┘")
+
+	// Create network with Conv3D processing 4x4x4 volume
+	// Input size: 4*4*4*1 (channels) = 64
+	net := nn.NewNetwork(64, 1, 1, 2)
+	net.BatchSize = 1
+
+	// InitConv3DLayer(depth, height, width, inCh, kernelSize, stride, padding, filters, act)
+	// Output dims: ((4 - 2 + 2*0)/1) + 1 = 3 -> 3x3x3 volume * 2 filters = 54 features
+	conv3d := nn.InitConv3DLayer(4, 4, 4, 1, 2, 1, 0, 2, nn.ActivationLeakyReLU)
+
+	net.SetLayer(0, 0, 0, conv3d)
+	net.SetLayer(0, 0, 1, nn.InitDenseLayer(54, 4, nn.ActivationSigmoid))
+
+	input := make([]float32, 64)
+	for i := range input {
+		input[i] = float32(i) * 0.01
+	}
+
+	output, _ := net.Forward(input)
+	if len(output) != 4 {
+		fmt.Printf("  ❌ Expected 4 outputs, got %d\n", len(output))
+		return false
+	}
+
+	expectedFeatures := 3 * 3 * 3 * 2
+	fmt.Printf("  ✓ Conv3D: [%d] volume → [%d] extracted features → Dense → [%d]\n", len(input), expectedFeatures, len(output))
+	fmt.Printf("  ✓ Output: [%.3f, %.3f, %.3f, %.3f]\n", output[0], output[1], output[2], output[3])
+
+	fmt.Println("  ✅ PASSED: Conv3D Layer")
 	return true
 }
 
@@ -2216,6 +2253,24 @@ var gpuLayerTests = []GPULayerTestCase{
 		InputSize: 2048,
 	},
 	{
+		Name: "Conv3D",
+		JSONConfig: `{
+			"id": "gpu_test_conv3d",
+			"batch_size": 1,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 5,
+			"layers": [
+				{"type": "dense", "activation": "leaky_relu", "input_height": 2048, "output_height": 2048},
+				{"type": "conv3d", "input_depth": 1, "input_height": 1, "input_width": 2048, "input_channels": 1, "filters": 1, "kernel_size": 3, "stride": 1, "padding": 1, "activation": "relu"},
+				{"type": "conv3d", "input_depth": 1, "input_height": 1, "input_width": 2048, "input_channels": 1, "filters": 1, "kernel_size": 3, "stride": 1, "padding": 1, "activation": "relu"},
+				{"type": "conv3d", "input_depth": 1, "input_height": 1, "input_width": 2048, "input_channels": 1, "filters": 1, "kernel_size": 3, "stride": 1, "padding": 1, "activation": "relu"},
+				{"type": "dense", "activation": "sigmoid", "input_height": 2048, "output_height": 2}
+			]
+		}`,
+		InputSize: 2048,
+	},
+	{
 		Name: "Conv2D",
 		JSONConfig: `{
 			"id": "gpu_test_conv2d",
@@ -2559,6 +2614,8 @@ func getLayerTestConfigs() []LayerTestConfig {
 		{Name: "Conv1D-128", LayerType: "conv1d", Activation: "relu", HiddenSize: 128, SeqLength: 16},
 		{Name: "Conv2D-64", LayerType: "conv2d", Activation: "relu", HiddenSize: 64, UseConvFormat: true},
 		{Name: "Conv2D-128", LayerType: "conv2d", Activation: "relu", HiddenSize: 128, UseConvFormat: true},
+		{Name: "Conv3D-64", LayerType: "conv3d", Activation: "relu", HiddenSize: 64, UseConvFormat: true},
+		{Name: "Conv3D-128", LayerType: "conv3d", Activation: "relu", HiddenSize: 128, UseConvFormat: true},
 		{Name: "RNN-128", LayerType: "rnn", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
 		{Name: "RNN-256", LayerType: "rnn", Activation: "tanh", HiddenSize: 256, SeqLength: 8},
 		{Name: "LSTM-128", LayerType: "lstm", Activation: "tanh", HiddenSize: 128, SeqLength: 8},
@@ -2608,6 +2665,20 @@ func createNetworkWithHiddenLayer(batchSize int, config LayerTestConfig) (*nn.Ne
 				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
 			]
 		}`, config.Name, batchSize, config.Activation, config.HiddenSize, config.HiddenSize*16)
+
+	case "conv3d":
+		jsonConfig = fmt.Sprintf(`{
+			"id": "training_verification_%s",
+			"batch_size": %d,
+			"grid_rows": 1,
+			"grid_cols": 1,
+			"layers_per_cell": 3,
+			"layers": [
+				{"type": "dense", "activation": "relu", "input_height": 2, "output_height": 8},
+				{"type": "conv3d", "activation": "%s", "input_channels": 1, "input_depth": 2, "input_height": 2, "input_width": 2, "filters": %d, "kernel_size": 2, "stride": 1, "padding": 0},
+				{"type": "dense", "activation": "sigmoid", "input_height": %d, "output_height": 2}
+			]
+		}`, config.Name, batchSize, config.Activation, config.HiddenSize, config.HiddenSize)
 
 	case "rnn":
 		jsonConfig = fmt.Sprintf(`{
@@ -3029,6 +3100,7 @@ func AllSaveLoadDTypes() []string {
 func AllSaveLoadLayerTypes() []string {
 	return []string{
 		"Dense",
+		"Conv3D",
 		"Conv2D",
 		"Conv1D",
 		"MultiHeadAttention",
@@ -3081,6 +3153,25 @@ func createSaveLoadTestNetwork(layerType string) (*nn.Network, error) {
 			OutputWidth:   8,
 			Kernel:        generateRandomWeights(8 * 3 * 3 * 3),
 			Bias:          generateRandomWeights(8),
+		})
+
+	case "Conv3D":
+		network.SetLayer(0, 0, 0, nn.LayerConfig{
+			Type:             nn.LayerConv3D,
+			Activation:       nn.ActivationScaledReLU,
+			Conv3DInChannels: 1,
+			Conv3DFilters:    2,
+			Conv3DKernelSize: 2,
+			Conv3DStride:     1,
+			Conv3DPadding:    0,
+			InputDepth:       2,
+			InputHeight:      2,
+			InputWidth:       2,
+			OutputDepth:      1,
+			OutputHeight:     1,
+			OutputWidth:      1,
+			Conv3DKernel:     generateRandomWeights(1 * 2 * 2 * 2 * 2), // in_ch * k * k * k * filters
+			Conv3DBias:       generateRandomWeights(2),
 		})
 
 	case "Conv1D":
@@ -3470,6 +3561,9 @@ func extractLayerWeights(cfg *nn.LayerConfig) []float32 {
 	case nn.LayerConv2D, nn.LayerConv1D:
 		weights = append(weights, cfg.Kernel...)
 		weights = append(weights, cfg.Bias...)
+	case nn.LayerConv3D:
+		weights = append(weights, cfg.Conv3DKernel...)
+		weights = append(weights, cfg.Conv3DBias...)
 	case nn.LayerMultiHeadAttention:
 		weights = append(weights, cfg.QWeights...)
 		weights = append(weights, cfg.KWeights...)
@@ -4406,6 +4500,13 @@ func stm_extractLayerWeights(cfg *nn.LayerConfig) map[string][]float32 {
 		}
 		if len(cfg.Bias) > 0 {
 			weights["bias"] = cfg.Bias
+		}
+	case nn.LayerConv3D:
+		if len(cfg.Conv3DKernel) > 0 {
+			weights["conv3d_kernel"] = cfg.Conv3DKernel
+		}
+		if len(cfg.Conv3DBias) > 0 {
+			weights["conv3d_bias"] = cfg.Conv3DBias
 		}
 	case nn.LayerNorm:
 		if len(cfg.Gamma) > 0 {
