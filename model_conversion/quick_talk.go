@@ -190,7 +190,7 @@ func main() {
 			network.Layers[i].SeqLength = maxSeqLen
 		}
 		network.GPU = true
-		network.GPUInferenceOnly = true // Avoid backward/gradient GPU allocations in chat inference
+		network.GPUInferenceOnly = true   // Avoid backward/gradient GPU allocations in chat inference
 		network.EnableGPUResiduals = true // Enable transformer skip-connections on GPU
 		if err := network.WeightsToGPU(); err != nil {
 			fmt.Printf("⚠️ Failed to mount GPU: %v. Falling back to CPU.\n", err)
@@ -202,6 +202,19 @@ func main() {
 
 	// Initialize Engine
 	engine = tokenizer.NewLLMEngine(network, embeddings, lmHead, finalNorm, tokenizer.ChatML)
+
+	// Set GPU LM Head if GPU is active
+	if network.GPU {
+		ctx, _ := gpu.GetContext()
+		vocabSize := len(embeddings) / network.InputSize
+		lmh, err := gpu.NewGPULMHead(ctx, network.InputSize, vocabSize, finalNorm, lmHead)
+		if err == nil {
+			engine.SetGPULMHead(lmh)
+			fmt.Println("⚡ GPU LM Head initialized!")
+		} else {
+			fmt.Printf("⚠️ GPULMHead init failed: %v\n", err)
+		}
+	}
 
 	fmt.Printf("✅ Model loaded!\n")
 	fmt.Printf("   Hidden: %d, Vocab: %d, Layers: %d\n\n", network.InputSize, engine.VocabSize, len(network.Layers))
