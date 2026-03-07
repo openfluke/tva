@@ -15,6 +15,7 @@ type Result struct {
 	Total     time.Duration
 	SizeKb    float64
 	PctSaved  float64
+	SimTax    float64 // % of time spent in dispatch/overhead vs pure math
 }
 
 func main() {
@@ -124,11 +125,11 @@ func main() {
 	}
 
 	// Print Results Table
-	fmt.Println("\n| Scenario              | Forward (avg) | Training (total) | Size (KB) | % Saved |")
-	fmt.Println("|-----------------------|---------------|------------------|-----------|---------|")
+	fmt.Println("\n| Scenario              | Forward (avg) | Training (total) | Size (KB) | % Saved | Sim Tax |")
+	fmt.Println("|-----------------------|---------------|------------------|-----------|---------|---------|")
 	for _, res := range resList {
-		fmt.Printf("| %-21s | %-13v | %-16v | %-9.1f | %-7.1f%% |\n",
-			res.Label, res.Forward, res.Total, res.SizeKb, res.PctSaved)
+		fmt.Printf("| %-21s | %-13v | %-16v | %-9.1f | %-7.1f%% | %-7.1f%% |\n",
+			res.Label, res.Forward, res.Total, res.SizeKb, res.PctSaved, res.SimTax)
 	}
 }
 
@@ -142,29 +143,64 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch, in, out, ite
 	// Warmup
 	poly.ForwardPolymorphic(net, input)
 
+	var totalLayerForward time.Duration
+	var lastLayerTimes []time.Duration
+
 	// Forward
 	start := time.Now()
 	for i := 0; i < iter; i++ {
-		poly.ForwardPolymorphic(net, input)
+		_, _, layerTimes := poly.ForwardPolymorphic(net, input)
+		lastLayerTimes = layerTimes
+		for _, d := range layerTimes {
+			totalLayerForward += d
+		}
 	}
 	fwd := time.Since(start) / time.Duration(iter)
+	avgLayerForward := totalLayerForward / time.Duration(iter)
 
-	// Backward
+	// Backward / Training
 	start = time.Now()
+	var lastBackwardTimes []time.Duration
 	for i := 0; i < iter; i++ {
-		for z := 0; z < net.Depth; z++ {
-			for y := 0; y < net.Rows; y++ {
-				for x := 0; x < net.Cols; x++ {
-					for l := 0; l < net.LayersPerCell; l++ {
-						layer := net.GetLayer(z, y, x, l)
-						pre := poly.NewTensor[float32](batch, out)
-						poly.DenseBackwardPolymorphic(layer, gradOut, input, pre)
-					}
-				}
+		// Manual history capture since ForwardTraining was "stupid"
+		hist_in := make([]*poly.Tensor[float32], len(net.Layers))
+		hist_pre := make([]*poly.Tensor[float32], len(net.Layers))
+		curr := input
+		for idx := range net.Layers {
+			l := &net.Layers[idx]
+			hist_in[idx] = curr
+			pre, post := poly.DispatchLayer(l, curr)
+			hist_pre[idx] = pre
+			curr = post
+		}
+		_, grads, bwdTimes := poly.BackwardPolymorphic(net, gradOut, hist_in, hist_pre)
+		lastBackwardTimes = bwdTimes
+		
+		// REAL WEIGHT UPDATE (The "Learning" Step)
+		lr := float32(0.001)
+		for idx := range net.Layers {
+			l := &net.Layers[idx]
+			if l.WeightStore != nil && grads[idx][1] != nil {
+				// Cast the gradient to float32 for the update step
+				gW := poly.ConvertTensor[float32, float32](grads[idx][1])
+				l.WeightStore.ApplyGradients(gW, lr)
 			}
 		}
 	}
 	bwd := time.Since(start) / time.Duration(iter)
+
+	// If it's a multi-type or specifically interesting, print a small breakdown
+	if label == "Exhaustive Multi-Type" {
+		fmt.Printf("\n--- Per-Layer Detail (%s) ---\n", label)
+		for i, d := range lastLayerTimes {
+			fmt.Printf("  Layer %d: Forward=%v, Backward=%v\n", i, d, lastBackwardTimes[i])
+		}
+	}
+
+	simTaxPct := 0.0
+	if fwd > 0 {
+		simTaxPct = (1.0 - (float64(avgLayerForward) / float64(fwd))) * 100.0
+	}
 
 	return Result{
 		Label:    label,
@@ -172,5 +208,6 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch, in, out, ite
 		Backward: bwd,
 		Total:    fwd + bwd,
 		SizeKb:   sizeKb,
+		SimTax:   simTaxPct,
 	}
 }
