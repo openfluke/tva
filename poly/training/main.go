@@ -47,7 +47,7 @@ func main() {
 	for i := range input.Data { input.Data[i] = 1.0 }
 
 	fmt.Println("\n--- Running Nested Forward ---")
-	preAct, postAct := poly.DispatchLayer(&outerParallel, input)
+	preAct, postAct := poly.DispatchLayer(&outerParallel, input, nil)
 	
 	fmt.Printf("Output Size: %d\n", len(postAct.Data))
 	if preAct.Nested != nil {
@@ -62,7 +62,7 @@ func main() {
 	gradOutput := poly.NewTensor[float32](1, outputSize + outputSize) // concat size
 	for i := range gradOutput.Data { gradOutput.Data[i] = 1.0 }
 
-	gIn, gW := poly.DispatchLayerBackward(&outerParallel, gradOutput, input, preAct)
+	gIn, gW := poly.DispatchLayerBackward(&outerParallel, gradOutput, input, nil, preAct)
 
 	// 4. Verify Gradient Tree
 	if gW != nil && gW.Nested != nil {

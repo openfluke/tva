@@ -45,7 +45,7 @@ func main() {
 	for i := range input.Data { input.Data[i] = 1.0 }
 
 	fmt.Println("\n--- Forward: Sequential[Dense, Parallel[Dense, Dense], Softmax] ---")
-	preAct, postAct := poly.DispatchLayer(&deepNet, input)
+	preAct, postAct := poly.DispatchLayer(&deepNet, input, nil)
 	fmt.Printf("Output Size: %d\n", len(postAct.Data))
 	
 	if preAct != nil && len(preAct.Nested) == 3 {
@@ -60,7 +60,7 @@ func main() {
 	gradOutput := poly.NewTensor[float32](1, hiddenSize) // Softmax out is same size as hidden
 	for i := range gradOutput.Data { gradOutput.Data[i] = 1.0 }
 
-	_, gW := poly.DispatchLayerBackward(&deepNet, gradOutput, input, preAct)
+	_, gW := poly.DispatchLayerBackward(&deepNet, gradOutput, input, nil, preAct)
 
 	// 3. Verify Gradient Tree
 	if gW != nil && len(gW.Nested) == 3 {

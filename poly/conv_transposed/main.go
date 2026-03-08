@@ -120,11 +120,11 @@ func runBenchmark(title string, lType poly.LayerType, types []struct{Label strin
 			}
 			for i := range input.Data { input.Data[i] = rand.Float32() }
 			
-			poly.DispatchLayer(layer, input)
+			poly.DispatchLayer(layer, input, nil)
 			
 			start := time.Now()
 			for i := 0; i < 3; i++ {
-				poly.DispatchLayer(layer, input)
+				poly.DispatchLayer(layer, input, nil)
 			}
 			avgForward := time.Since(start) / 3
 

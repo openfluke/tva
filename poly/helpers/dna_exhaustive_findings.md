@@ -22,7 +22,7 @@
 | Dense      | int2       | 100.00% | 66.67% | 66.67% | true |
 | Dense      | uint2      | 100.00% | 66.67% | 66.67% | true |
 | Dense      | ternary    | 100.00% | 66.67% | 66.67% | true |
-| Dense      | binary     | 100.00% | 99.74% | 68.49% | true |
+| Dense      | binary     | 100.00% | 99.74% | 65.36% | true |
 | MHA        | fp64       | 100.00% | 66.67% | 66.67% | true |
 | MHA        | fp32       | 100.00% | 66.67% | 66.67% | true |
 | MHA        | fp16       | 100.00% | 66.67% | 66.67% | true |
@@ -43,7 +43,7 @@
 | MHA        | int2       | 100.00% | 66.67% | 66.67% | true |
 | MHA        | uint2      | 100.00% | 66.67% | 66.67% | true |
 | MHA        | ternary    | 100.00% | 66.67% | 66.67% | true |
-| MHA        | binary     | 100.00% | 99.94% | 67.03% | true |
+| MHA        | binary     | 100.00% | 99.94% | 66.48% | true |
 | SwiGLU     | fp64       | 100.00% | 66.67% | 66.67% | true |
 | SwiGLU     | fp32       | 100.00% | 66.67% | 66.67% | true |
 | SwiGLU     | fp16       | 100.00% | 66.67% | 66.67% | true |
@@ -64,7 +64,7 @@
 | SwiGLU     | int2       | 100.00% | 66.67% | 66.67% | true |
 | SwiGLU     | uint2      | 100.00% | 66.67% | 66.67% | true |
 | SwiGLU     | ternary    | 100.00% | 66.67% | 66.67% | true |
-| SwiGLU     | binary     | 100.00% | 99.92% | 64.79% | true |
+| SwiGLU     | binary     | 100.00% | 99.92% | 66.34% | true |
 | RMSNorm    | fp64       | 100.00% | 66.67% | 66.67% | true |
 | RMSNorm    | fp32       | 100.00% | 66.67% | 66.67% | true |
 | RMSNorm    | fp16       | 100.00% | 66.67% | 66.67% | true |
@@ -85,7 +85,7 @@
 | RMSNorm    | int2       | 100.00% | 66.67% | 66.67% | true |
 | RMSNorm    | uint2      | 100.00% | 66.67% | 66.67% | true |
 | RMSNorm    | ternary    | 100.00% | 66.67% | 66.67% | true |
-| RMSNorm    | binary     | 100.00% | 95.83% | 66.67% | true |
+| RMSNorm    | binary     | 100.00% | 95.83% | 75.00% | true |
 | CNN1       | fp64       | 100.00% | 100.00% | 66.67% | true |
 | CNN1       | fp32       | 100.00% | 100.00% | 66.67% | true |
 | CNN1       | fp16       | 100.00% | 100.00% | 66.67% | true |
@@ -169,7 +169,7 @@
 | RNN        | int2       | 100.00% | 66.67% | 66.67% | true |
 | RNN        | uint2      | 100.00% | 66.67% | 66.67% | true |
 | RNN        | ternary    | 100.00% | 66.67% | 66.67% | true |
-| RNN        | binary     | 100.00% | 99.87% | 66.41% | true |
+| RNN        | binary     | 100.00% | 99.87% | 68.06% | true |
 | LSTM       | fp64       | 100.00% | 66.67% | 66.67% | true |
 | LSTM       | fp32       | 100.00% | 66.67% | 66.67% | true |
 | LSTM       | fp16       | 100.00% | 66.67% | 66.67% | true |
@@ -190,7 +190,7 @@
 | LSTM       | int2       | 100.00% | 66.67% | 66.67% | true |
 | LSTM       | uint2      | 100.00% | 66.67% | 66.67% | true |
 | LSTM       | ternary    | 100.00% | 66.67% | 66.67% | true |
-| LSTM       | binary     | 100.00% | 99.97% | 66.23% | true |
+| LSTM       | binary     | 100.00% | 99.97% | 67.43% | true |
 | LayerNorm  | fp64       | 100.00% | 66.67% | 66.67% | true |
 | LayerNorm  | fp32       | 100.00% | 66.67% | 66.67% | true |
 | LayerNorm  | fp16       | 100.00% | 66.67% | 66.67% | true |
@@ -211,7 +211,7 @@
 | LayerNorm  | int2       | 100.00% | 66.67% | 66.67% | true |
 | LayerNorm  | uint2      | 100.00% | 66.67% | 66.67% | true |
 | LayerNorm  | ternary    | 100.00% | 66.67% | 66.67% | true |
-| LayerNorm  | binary     | 100.00% | 97.92% | 75.00% | true |
+| LayerNorm  | binary     | 100.00% | 97.92% | 70.83% | true |
 | ConvTransposed1D | fp64       | 100.00% | 100.00% | 66.67% | true |
 | ConvTransposed1D | fp32       | 100.00% | 100.00% | 66.67% | true |
 | ConvTransposed1D | fp16       | 100.00% | 100.00% | 66.67% | true |

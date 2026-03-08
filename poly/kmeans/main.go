@@ -66,11 +66,11 @@ func main() {
 		for i := range input.Data { input.Data[i] = rand.Float32() }
 		
 		// Warmup
-		poly.DispatchLayer(layer, input)
+		poly.DispatchLayer(layer, input, nil)
 		
 		fStart := time.Now()
 		for i := 0; i < iterations; i++ {
-			poly.DispatchLayer(layer, input)
+			poly.DispatchLayer(layer, input, nil)
 		}
 		avgForward := time.Since(fStart) / time.Duration(iterations)
 

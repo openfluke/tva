@@ -95,17 +95,17 @@ func main() {
 			for i := range gradOutput.Data { gradOutput.Data[i] = rand.Float32() }
 
 			// Warmup
-			poly.DispatchLayer(layer, input)
+			poly.DispatchLayer(layer, input, nil)
 			
 			fStart := time.Now()
 			for i := 0; i < iterations; i++ {
-				poly.DispatchLayer(layer, input)
+				poly.DispatchLayer(layer, input, nil)
 			}
 			avgForward := time.Since(fStart) / time.Duration(iterations)
 
 			trainStart := time.Now()
-			pre, _ := poly.DispatchLayer(layer, input)
-			poly.DispatchLayerBackward(layer, gradOutput, input, pre)
+			pre, _ := poly.DispatchLayer(layer, input, nil)
+			poly.DispatchLayerBackward(layer, gradOutput, input, nil, pre)
 			trainTotal := time.Since(trainStart)
 
 			currSizeKB := float64(layer.WeightStore.SizeInBytes(dtype)) / 1024.0

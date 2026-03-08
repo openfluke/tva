@@ -48,7 +48,7 @@ func main() {
 
 	// 5. Dispatch via the router
 	fmt.Println("\n--- Dispatching via Spatial Router (0,0,0,0) -> Hop -> (0,1,1,0) ---")
-	_, out := poly.DispatchLayer(routingLayer, input)
+	_, out := poly.DispatchLayer(routingLayer, input, nil)
 	
 	fmt.Printf("Output Size: %d\n", len(out.Data))
 	if len(out.Data) == 32 {

@@ -90,14 +90,14 @@ func measure(l *poly.VolumetricLayer, input *poly.Tensor[float32]) {
 	iterations := 100
 	
 	// Warmup
-	poly.DispatchLayer(l, input)
+	poly.DispatchLayer(l, input, nil)
 	
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		poly.DispatchLayer(l, input)
+		poly.DispatchLayer(l, input, nil)
 	}
 	elapsed := time.Since(start) / time.Duration(iterations)
 	
-	_, out := poly.DispatchLayer(l, input)
+	_, out := poly.DispatchLayer(l, input, nil)
 	fmt.Printf("Avg Latency: %v | Output Size: %d\n", elapsed, len(out.Data))
 }

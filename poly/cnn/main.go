@@ -241,7 +241,7 @@ func performBenchmark(label string, net *poly.VolumetricNetwork, iterations, bat
 		for idx := range net.Layers {
 			l := &net.Layers[idx]
 			histIn[idx] = curr
-			pre, post := poly.DispatchLayer(l, curr)
+			pre, post := poly.DispatchLayer(l, curr, nil)
 			histPre[idx] = pre
 			curr = post
 		}
