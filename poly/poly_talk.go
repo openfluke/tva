@@ -58,6 +58,10 @@ func main() {
 	}
 
 	reader := bufio.NewReader(os.Stdin)
+	
+	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
+	deterministic = detInput == "1"
+
 	modelInput := readInput(reader, "\nSelect model number: ", "1")
 	var selectedIdx int
 	fmt.Sscanf(modelInput, "%d", &selectedIdx)
@@ -70,7 +74,12 @@ func main() {
 
 	// Load Tokenizer
 	tokenizerPath := filepath.Join(snapshotDir, "tokenizer.json")
-	tk, _ = poly.LoadTokenizer(tokenizerPath)
+	tk, err := poly.LoadTokenizer(tokenizerPath)
+	if err != nil {
+		fmt.Printf("⚠️  Tokenizer not found or failed to load: %v\n", err)
+		// Fallback or exit
+		os.Exit(1)
+	}
 
 	// Load Config for EOS
 	configPath := filepath.Join(snapshotDir, "config.json")
@@ -78,9 +87,17 @@ func main() {
 
 	// Load Tensors
 	safetensorFiles, _ := filepath.Glob(filepath.Join(snapshotDir, "*.safetensors"))
+	if len(safetensorFiles) == 0 {
+		fmt.Printf("⚠️  No .safetensors files found in %s\n", snapshotDir)
+		os.Exit(1)
+	}
 	allTensors := make(map[string][]float32)
 	for _, f := range safetensorFiles {
-		t, _ := poly.LoadSafetensors(f)
+		t, err := poly.LoadSafetensors(f)
+		if err != nil {
+			fmt.Printf("⚠️  Failed to load %s: %v\n", f, err)
+			continue
+		}
 		for k, v := range t {
 			allTensors[k] = v
 		}
@@ -184,12 +201,18 @@ func main() {
 		}
 
 		fmt.Print("Poly: ")
+		temp := float32(0.7)
+		if deterministic {
+			temp = 0
+		}
 		opts := poly.GenOptions{
-			MaxTokens:     maxTokens,
-			Temperature:   0.7,
-			TopK:          40,
-			Deterministic: false,
-			EOSTokens:     eosTokens,
+			MaxTokens:         maxTokens,
+			Temperature:       temp,
+			TopK:              40,
+			Deterministic:     deterministic,
+			EOSTokens:         eosTokens,
+			RepetitionPenalty: 1.1,
+			RepetitionWindow:  64,
 		}
 
 		encode := func(text string) []uint32 {
@@ -220,14 +243,27 @@ func readInput(reader *bufio.Reader, prompt string, Default string) string {
 }
 
 func loadEOSTokens(configPath string) []int {
-	data, _ := os.ReadFile(configPath)
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return []int{2, 0}
+	}
 	var config map[string]interface{}
 	json.Unmarshal(data, &config)
 	var tokens []int
 	if eosID, ok := config["eos_token_id"]; ok {
-		if v, ok := eosID.(float64); ok {
+		switch v := eosID.(type) {
+		case float64:
 			tokens = append(tokens, int(v))
+		case []interface{}:
+			for _, item := range v {
+				if f, ok := item.(float64); ok {
+					tokens = append(tokens, int(f))
+				}
+			}
 		}
+	}
+	if len(tokens) == 0 {
+		return []int{2, 0}
 	}
 	return tokens
 }
