@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/openfluke/loom/poly"
@@ -62,10 +63,17 @@ func main() {
 	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
 	deterministic = detInput == "1"
 
+	// Auto-detect optimal tile size from hardware before asking the user
+	autoTile := poly.CalculateOptimalTileSize(64) // 64 = sane default headDim until model is loaded
+	tilingPrompt := fmt.Sprintf("🚀 FlashPoly Tile size? (auto-detected: %d | 0=disable | type a number to override) [%d]: ", autoTile, autoTile)
+	tilingInput := readInput(reader, tilingPrompt, strconv.Itoa(autoTile))
+
 	useTiling := true
-	tilingInput := readInput(reader, "🚀 Enable FlashPoly Tiling? (1=yes / 0=no) [1]: ", "1")
+	tileSize := -1 // -1 = let EnableTiling auto-detect per-layer
 	if tilingInput == "0" {
 		useTiling = false
+	} else if v, err := strconv.Atoi(tilingInput); err == nil && v > 0 {
+		tileSize = v
 	}
 
 	gpuInput := readInput(reader, "🎮 Enable GPU Acceleration? (1=yes / 0=no) [0]: ", "0")
@@ -198,7 +206,7 @@ func main() {
 	// Create Poly Transformer
 	tr = poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
 	if useTiling {
-		tr.EnableTiling(-1) // Auto-detect based on hardware cache sizes
+		tr.EnableTiling(tileSize) // -1 = auto-detect per layer; >0 = user override
 	}
 	if useGPU {
 		fmt.Print("⏳ Initializing WebGPU...")
@@ -213,6 +221,17 @@ func main() {
 			} else {
 				fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
 			}
+
+			// --- GPU tile size: show auto-detected value, allow override ---
+			autoGPUTile := net.GPUContext.GPUTileSize
+			gpuTilePrompt := fmt.Sprintf("🔷 GPU Tile size? (auto-detected: %d | Enter=keep | type a number to override): ", autoGPUTile)
+			gpuTileInput := readInput(reader, gpuTilePrompt, strconv.Itoa(autoGPUTile))
+			if v, err2 := strconv.Atoi(gpuTileInput); err2 == nil && v > 0 {
+				net.GPUContext.GPUTileSize = v
+				fmt.Printf("   ✅ GPU Tile set to %d\n", v)
+			} else {
+				fmt.Printf("   ✅ GPU Tile auto: %d\n", autoGPUTile)
+			}
 		}
 	}
 
@@ -226,6 +245,35 @@ func main() {
 		userMsg = strings.TrimSpace(userMsg)
 		if userMsg == "exit" || userMsg == "quit" {
 			break
+		}
+
+		if strings.HasPrefix(userMsg, "/tile") {
+			parts := strings.Fields(userMsg)
+			if len(parts) >= 2 {
+				if v, err := strconv.Atoi(parts[1]); err == nil && v > 0 {
+					if tr.Network.GPUContext != nil {
+						tr.Network.GPUContext.GPUTileSize = v
+						fmt.Printf("🔷 GPU tile size set to %d\n", v)
+					} else {
+						tileSize = v
+						tr.EnableTiling(tileSize)
+						fmt.Printf("🔷 CPU tile size set to %d\n", v)
+					}
+				} else {
+					if tr.Network.GPUContext != nil {
+						fmt.Printf("🔷 Current GPU tile size: %d\n", tr.Network.GPUContext.GPUTileSize)
+					} else {
+						fmt.Printf("🔷 Current CPU tile size: %d (use /tile <n> to change)\n", tileSize)
+					}
+				}
+			} else {
+				if tr.Network.GPUContext != nil {
+					fmt.Printf("🔷 Current GPU tile size: %d (use /tile <n> to change)\n", tr.Network.GPUContext.GPUTileSize)
+				} else {
+					fmt.Printf("🔷 Current CPU tile size: %d (use /tile <n> to change)\n", tileSize)
+				}
+			}
+			continue
 		}
 
 		if strings.HasPrefix(userMsg, "/gpu") {
