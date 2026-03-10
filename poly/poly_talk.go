@@ -216,6 +216,7 @@ func main() {
 		}
 	}
 
+	fmt.Printf("\n\n🖥️  %s", poly.GetDeviceDescription(net))
 	fmt.Printf("\n✅ Model loaded on Poly! (%d layers)\n\n", numLayers)
 
 	// Chat Loop
