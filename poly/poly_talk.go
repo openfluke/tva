@@ -219,7 +219,12 @@ func main() {
 			if err := net.SyncAllToGPU(); err != nil {
 				fmt.Printf(" ❌ Sync Failed: %v\n", err)
 			} else {
-				fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
+				fmt.Print(" ✅ Weights Sync Complete! ")
+				if err := tr.SyncToGPU(); err != nil {
+					fmt.Printf(" ❌ Transformer Sync Failed: %v\n", err)
+				} else {
+					fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
+				}
 			}
 
 			// --- GPU tile size: show auto-detected value, allow override ---
