@@ -195,7 +195,7 @@ func main() {
 	// Create Poly Transformer
 	tr = poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
 	if useTiling {
-		tr.EnableTiling(32)
+		tr.EnableTiling(-1) // Auto-detect based on hardware cache sizes
 	}
 
 	fmt.Printf("\n✅ Model loaded on Poly! (%d layers)\n\n", numLayers)
