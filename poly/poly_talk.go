@@ -68,6 +68,9 @@ func main() {
 		useTiling = false
 	}
 
+	gpuInput := readInput(reader, "🎮 Enable GPU Acceleration? (1=yes / 0=no) [0]: ", "0")
+	useGPU := gpuInput == "1"
+
 	modelInput := readInput(reader, "\nSelect model number: ", "1")
 	var selectedIdx int
 	fmt.Sscanf(modelInput, "%d", &selectedIdx)
@@ -197,6 +200,21 @@ func main() {
 	if useTiling {
 		tr.EnableTiling(-1) // Auto-detect based on hardware cache sizes
 	}
+	if useGPU {
+		fmt.Print("⏳ Initializing WebGPU...")
+		err := net.InitWGPU()
+		if err != nil {
+			fmt.Printf(" ❌ Failed: %v (Falling back to CPU)\n", err)
+		} else {
+			fmt.Print(" ✅ Success!")
+			fmt.Print(" 🚀 Syncing Numerical Monster...")
+			if err := net.SyncAllToGPU(); err != nil {
+				fmt.Printf(" ❌ Sync Failed: %v\n", err)
+			} else {
+				fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
+			}
+		}
+	}
 
 	fmt.Printf("\n✅ Model loaded on Poly! (%d layers)\n\n", numLayers)
 
@@ -207,6 +225,24 @@ func main() {
 		userMsg = strings.TrimSpace(userMsg)
 		if userMsg == "exit" || userMsg == "quit" {
 			break
+		}
+
+		if strings.HasPrefix(userMsg, "/gpu") {
+			fmt.Println("🚀 Syncing all layers to GPU VRAM (Residency Mode)...")
+			for i := range tr.Network.Layers {
+				tr.Network.Layers[i].SyncToGPU()
+			}
+			fmt.Println("✅ GPU Sync Complete! The 'Numerical Monster' is now fully resident.")
+			continue
+		}
+
+		if strings.HasPrefix(userMsg, "/cpu") {
+			fmt.Println("☁️  Moving everything back to CPU RAM...")
+			for i := range tr.Network.Layers {
+				tr.Network.Layers[i].SyncToCPU()
+			}
+			fmt.Println("✅ CPU Reset Complete.")
+			continue
 		}
 
 		fmt.Print("Poly: ")
