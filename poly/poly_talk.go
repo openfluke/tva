@@ -62,6 +62,12 @@ func main() {
 	detInput := readInput(reader, "🎯 Deterministic mode? (1=yes / 0=no) [1]: ", "1")
 	deterministic = detInput == "1"
 
+	useTiling := true
+	tilingInput := readInput(reader, "🚀 Enable FlashPoly Tiling? (1=yes / 0=no) [1]: ", "1")
+	if tilingInput == "0" {
+		useTiling = false
+	}
+
 	modelInput := readInput(reader, "\nSelect model number: ", "1")
 	var selectedIdx int
 	fmt.Sscanf(modelInput, "%d", &selectedIdx)
@@ -188,6 +194,9 @@ func main() {
 
 	// Create Poly Transformer
 	tr = poly.NewTransformer[float32](net, embeddings, lmHead, finalNorm, poly.ChatML)
+	if useTiling {
+		tr.EnableTiling(32)
+	}
 
 	fmt.Printf("\n✅ Model loaded on Poly! (%d layers)\n\n", numLayers)
 
