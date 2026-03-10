@@ -224,6 +224,9 @@ func main() {
 					fmt.Printf(" ❌ Transformer Sync Failed: %v\n", err)
 				} else {
 					fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
+					fmt.Println("    • 🎮 GPU Embeddings: Loaded")
+					fmt.Println("    • 🎮 GPU Final Norm: Loaded")
+					fmt.Println("    • 🎮 GPU LM Head:    Loaded")
 				}
 			}
 
