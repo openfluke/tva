@@ -18,7 +18,8 @@ var (
 	tk            *poly.Tokenizer
 	eosTokens     []int
 	chatTurns     []poly.Turn
-	deterministic bool
+	weightDType   poly.DType = poly.DTypeFloat32
+	deterministic bool       = true
 	maxTokens     = 50
 	maxSeqLen     = 512
 )
@@ -76,8 +77,22 @@ func main() {
 		tileSize = v
 	}
 
-	gpuInput := readInput(reader, "🎮 Enable GPU Acceleration? (1=yes / 0=no) [0]: ", "0")
-	useGPU := gpuInput == "1"
+	var useGPU bool
+	fmt.Print("🎮 Enable GPU Acceleration? (1=yes / 0=no) [0]: ")
+	input, _ := reader.ReadString('\n')
+	input = strings.TrimSpace(input)
+	useGPU = input == "1"
+
+	if useGPU {
+		fmt.Print("💎 Weight Precision? (4=Q4_0 / 32=FP32) [4]: ")
+		input, _ = reader.ReadString('\n')
+		input = strings.TrimSpace(input)
+		if input == "32" {
+			weightDType = poly.DTypeFloat32
+		} else {
+			weightDType = poly.DTypeInt4
+		}
+	}
 
 	modelInput := readInput(reader, "\nSelect model number: ", "1")
 	var selectedIdx int
@@ -209,37 +224,22 @@ func main() {
 		tr.EnableTiling(tileSize) // -1 = auto-detect per layer; >0 = user override
 	}
 	if useGPU {
-		fmt.Print("⏳ Initializing WebGPU...")
-		err := net.InitWGPU()
-		if err != nil {
-			fmt.Printf(" ❌ Failed: %v (Falling back to CPU)\n", err)
+		fmt.Print("⏳ Initializing WebGPU... ")
+		if err := tr.Network.InitWGPU(); err != nil {
+			fmt.Printf("❌ Failed: %v\n", err)
+			useGPU = false
 		} else {
-			fmt.Print(" ✅ Success!")
-			fmt.Print(" 🚀 Syncing Numerical Monster...")
-			if err := net.SyncAllToGPU(); err != nil {
-				fmt.Printf(" ❌ Sync Failed: %v\n", err)
-			} else {
-				fmt.Print(" ✅ Weights Sync Complete! ")
-				if err := tr.SyncToGPU(); err != nil {
-					fmt.Printf(" ❌ Transformer Sync Failed: %v\n", err)
-				} else {
-					fmt.Println(" ✅ FULL VRAM RESIDENCY ACTIVE")
-					fmt.Println("    • 🎮 GPU Embeddings: Loaded")
-					fmt.Println("    • 🎮 GPU Final Norm: Loaded")
-					fmt.Println("    • 🎮 GPU LM Head:    Loaded")
-				}
+			fmt.Println("✅ Success! 🚀 Syncing Numerical Monster...")
+			for i := range tr.Network.Layers {
+				tr.Network.Layers[i].DType = weightDType
+				(&tr.Network.Layers[i]).SyncToGPU()
 			}
+			tr.SyncToGPU()
+			fmt.Printf("✅ FULL VRAM RESIDENCY ACHIEVED (%s)\n", weightDType.String())
 
-			// --- GPU tile size: show auto-detected value, allow override ---
+			// --- GPU tile size ---
 			autoGPUTile := net.GPUContext.GPUTileSize
-			gpuTilePrompt := fmt.Sprintf("🔷 GPU Tile size? (auto-detected: %d | Enter=keep | type a number to override): ", autoGPUTile)
-			gpuTileInput := readInput(reader, gpuTilePrompt, strconv.Itoa(autoGPUTile))
-			if v, err2 := strconv.Atoi(gpuTileInput); err2 == nil && v > 0 {
-				net.GPUContext.GPUTileSize = v
-				fmt.Printf("   ✅ GPU Tile set to %d\n", v)
-			} else {
-				fmt.Printf("   ✅ GPU Tile auto: %d\n", autoGPUTile)
-			}
+			fmt.Printf("🔷 GPU Tile size auto-detected: %d\n", autoGPUTile)
 		}
 	}
 
@@ -287,7 +287,8 @@ func main() {
 		if strings.HasPrefix(userMsg, "/gpu") {
 			fmt.Println("🚀 Syncing all layers to GPU VRAM (Residency Mode)...")
 			for i := range tr.Network.Layers {
-				tr.Network.Layers[i].SyncToGPU()
+				tr.Network.Layers[i].DType = weightDType // Ensure DType is set for manual sync
+				(&tr.Network.Layers[i]).SyncToGPU()
 			}
 			fmt.Println("✅ GPU Sync Complete! The 'Numerical Monster' is now fully resident.")
 			continue
@@ -296,7 +297,7 @@ func main() {
 		if strings.HasPrefix(userMsg, "/cpu") {
 			fmt.Println("☁️  Moving everything back to CPU RAM...")
 			for i := range tr.Network.Layers {
-				tr.Network.Layers[i].SyncToCPU()
+				(&tr.Network.Layers[i]).SyncToCPU()
 			}
 			fmt.Println("✅ CPU Reset Complete.")
 			continue
