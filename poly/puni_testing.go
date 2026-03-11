@@ -53,6 +53,12 @@ func main() {
 
 	// 2. CNN3 BENCHMARKS
 	runBenchSet("CNN3", poly.LayerCNN3, allTypes)
+
+	// 3. CNN2 BENCHMARKS
+	runBenchSet("CNN2", poly.LayerCNN2, allTypes)
+
+	// 4. CNN1 BENCHMARKS
+	runBenchSet("CNN1", poly.LayerCNN1, allTypes)
 }
 
 func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
@@ -97,6 +103,26 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 				l.OutputHeight = 4
 				l.OutputWidth = 4
 				l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize * l.KernelSize * l.KernelSize)
+			} else if lType == poly.LayerCNN2 {
+				l.InputChannels = 8
+				l.InputHeight = 8
+				l.InputWidth = 8
+				l.Filters = 8
+				l.KernelSize = 3
+				l.Stride = 1
+				l.Padding = 1
+				l.OutputHeight = 8
+				l.OutputWidth = 8
+				l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize * l.KernelSize)
+			} else if lType == poly.LayerCNN1 {
+				l.InputChannels = 8
+				l.InputHeight = 64
+				l.Filters = 8
+				l.KernelSize = 3
+				l.Stride = 1
+				l.Padding = 1
+				l.OutputHeight = 64
+				l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize)
 			} else {
 				l.InputHeight = inputSize
 				l.OutputHeight = outputSize
@@ -134,6 +160,26 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 			l.OutputHeight = 4
 			l.OutputWidth = 4
 			l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize * l.KernelSize * l.KernelSize)
+		} else if lType == poly.LayerCNN2 {
+			l.InputChannels = 8
+			l.InputHeight = 8
+			l.InputWidth = 8
+			l.Filters = 8
+			l.KernelSize = 3
+			l.Stride = 1
+			l.Padding = 1
+			l.OutputHeight = 8
+			l.OutputWidth = 8
+			l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize * l.KernelSize)
+		} else if lType == poly.LayerCNN1 {
+			l.InputChannels = 8
+			l.InputHeight = 64
+			l.Filters = 8
+			l.KernelSize = 3
+			l.Stride = 1
+			l.Padding = 1
+			l.OutputHeight = 64
+			l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize)
 		} else {
 			l.InputHeight = inputSize
 			l.OutputHeight = outputSize
@@ -161,6 +207,12 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch int, lType po
 	if lType == poly.LayerCNN3 {
 		input = poly.NewTensor[float32](batch, 8, 4, 4, 4)
 		gradOut = poly.NewTensor[float32](batch, 8, 4, 4, 4)
+	} else if lType == poly.LayerCNN2 {
+		input = poly.NewTensor[float32](batch, 8, 8, 8)
+		gradOut = poly.NewTensor[float32](batch, 8, 8, 8)
+	} else if lType == poly.LayerCNN1 {
+		input = poly.NewTensor[float32](batch, 8, 64)
+		gradOut = poly.NewTensor[float32](batch, 8, 64)
 	} else {
 		input = poly.NewTensor[float32](batch, in)
 		gradOut = poly.NewTensor[float32](batch, out)
