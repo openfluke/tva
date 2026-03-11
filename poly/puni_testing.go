@@ -21,7 +21,7 @@ type Result struct {
 }
 
 func main() {
-	layerFlag := flag.String("layer", "all", "Specify layer to benchmark (all, dense, cnn1, cnn2, cnn3, embedding, lstm)")
+	layerFlag := flag.String("layer", "all", "Specify layer to benchmark (all, dense, cnn1, cnn2, cnn3, embedding, lstm, mha, rmsnorm, layernorm, residual, rnn, sequential, swiglu)")
 	flag.Parse()
 
 	target := strings.ToLower(*layerFlag)
@@ -75,7 +75,12 @@ func main() {
 		runBenchSet("CNN1", poly.LayerCNN1, allTypes)
 	}
 
-	// 5. EMBEDDING BENCHMARKS
+	// 5. RNN BENCHMARKS
+	if target == "all" || target == "rnn" {
+		runBenchSet("RNN", poly.LayerRNN, allTypes)
+	}
+
+	// 6. EMBEDDING BENCHMARKS
 	if target == "all" || target == "embedding" {
 		runBenchSet("EMBEDDING", poly.LayerEmbedding, allTypes)
 	}
@@ -83,6 +88,36 @@ func main() {
 	// 6. LSTM BENCHMARKS
 	if target == "all" || target == "lstm" {
 		runBenchSet("LSTM", poly.LayerLSTM, allTypes)
+	}
+
+	// 7. MHA BENCHMARKS
+	if target == "all" || target == "mha" {
+		runBenchSet("MHA", poly.LayerMultiHeadAttention, allTypes)
+	}
+
+	// 8. RMSNORM BENCHMARKS
+	if target == "all" || target == "rmsnorm" {
+		runBenchSet("RMSNORM", poly.LayerRMSNorm, allTypes)
+	}
+
+	// 9. LAYERNORM BENCHMARKS
+	if target == "all" || target == "layernorm" {
+		runBenchSet("LAYERNORM", poly.LayerLayerNorm, allTypes)
+	}
+
+	// 10. RESIDUAL BENCHMARKS
+	if target == "all" || target == "residual" {
+		runBenchSet("RESIDUAL", poly.LayerResidual, allTypes)
+	}
+
+	// 11. SEQUENTIAL BENCHMARKS
+	if target == "all" || target == "sequential" {
+		runBenchSet("SEQUENTIAL", poly.LayerSequential, allTypes)
+	}
+
+	// 12. SWIGLU BENCHMARKS
+	if target == "all" || target == "swiglu" {
+		runBenchSet("SWIGLU", poly.LayerSwiGLU, allTypes)
 	}
 }
 
@@ -95,7 +130,7 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 	batchSize := 1
 	iterations := 20
 	depth := 4
-	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM {
+	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM || lType == poly.LayerMultiHeadAttention || lType == poly.LayerRMSNorm || lType == poly.LayerLayerNorm || lType == poly.LayerResidual || lType == poly.LayerRNN || lType == poly.LayerSequential || lType == poly.LayerSwiGLU {
 		depth = 1
 	}
 
@@ -163,6 +198,42 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 				hhSize := l.OutputHeight * l.OutputHeight
 				bSize := l.OutputHeight
 				l.WeightStore = poly.NewWeightStore(4 * (ihSize + hhSize + bSize))
+			} else if lType == poly.LayerRNN {
+				l.InputHeight = 128
+				l.OutputHeight = 128
+				l.SeqLength = 16
+				ihSize := l.OutputHeight * l.InputHeight
+				hhSize := l.OutputHeight * l.OutputHeight
+				bSize := l.OutputHeight
+				l.WeightStore = poly.NewWeightStore(ihSize + hhSize + bSize)
+			} else if lType == poly.LayerMultiHeadAttention {
+				l.DModel = 128
+				l.NumHeads = 4
+				l.NumKVHeads = 4
+				l.HeadDim = 32
+				l.MaxSeqLen = 512
+				kvDim := l.NumKVHeads * l.HeadDim
+				l.WeightStore = poly.NewWeightStore(2*(l.DModel*l.DModel+l.DModel) + 2*(l.DModel*kvDim+kvDim))
+			} else if lType == poly.LayerRMSNorm {
+				l.OutputHeight = 1024
+				l.WeightStore = poly.NewWeightStore(l.OutputHeight)
+			} else if lType == poly.LayerLayerNorm {
+				l.OutputHeight = 1024
+				l.WeightStore = poly.NewWeightStore(2 * l.OutputHeight)
+			} else if lType == poly.LayerResidual {
+				l.OutputHeight = 1024
+				l.WeightStore = poly.NewWeightStore(0) // No weights
+			} else if lType == poly.LayerSequential {
+				l.SequentialLayers = []poly.VolumetricLayer{
+					{Type: poly.LayerDense, InputHeight: 256, OutputHeight: 256, WeightStore: poly.NewWeightStore(256 * 256)},
+					{Type: poly.LayerDense, InputHeight: 256, OutputHeight: 256, WeightStore: poly.NewWeightStore(256 * 256)},
+				}
+				l.WeightStore = poly.NewWeightStore(0) // Sequential itself has no weights
+			} else if lType == poly.LayerSwiGLU {
+				l.InputHeight = 128
+				l.OutputHeight = 256
+				ihSize := 128 * 256
+				l.WeightStore = poly.NewWeightStore(3*ihSize + 2*256 + 128)
 			} else {
 				l.InputHeight = inputSize
 				l.OutputHeight = outputSize
@@ -179,6 +250,21 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 			hhSize := outputSize * outputSize
 			bSize := outputSize
 			baselineWeights = depth * 4 * (ihSize + hhSize + bSize)
+		} else if lType == poly.LayerMultiHeadAttention {
+			dModel := 128
+			kvDim := 128 // assuming numHeads == numKVHeads
+			baselineWeights = depth * (2*(dModel*dModel+dModel) + 2*(dModel*kvDim+kvDim))
+		} else if lType == poly.LayerRNN {
+			baselineWeights = depth * (128*128 + 128*128 + 128)
+		} else if lType == poly.LayerRMSNorm {
+			baselineWeights = depth * 1024
+			baselineWeights = depth * 2048
+		} else if lType == poly.LayerResidual {
+			baselineWeights = 0
+		} else if lType == poly.LayerSequential {
+			baselineWeights = depth * (256*256 + 256*256)
+		} else if lType == poly.LayerSwiGLU {
+			baselineWeights = depth * (128*256*3 + 256*2 + 128)
 		}
 		baselineSize := float64(baselineWeights*4) / 1024.0
 		res.PctSaved = (1.0 - (res.SizeKb / baselineSize)) * 100.0
@@ -187,7 +273,7 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 
 	// Hybrid / Mixed
 	mixedDepth := len(allTypes)
-	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM {
+	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM || lType == poly.LayerMultiHeadAttention || lType == poly.LayerRMSNorm || lType == poly.LayerLayerNorm || lType == poly.LayerResidual || lType == poly.LayerRNN || lType == poly.LayerSequential || lType == poly.LayerSwiGLU {
 		mixedDepth = 1
 	}
 	net := poly.NewVolumetricNetwork(1, 1, 1, mixedDepth)
@@ -242,6 +328,42 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 			hhSize := l.OutputHeight * l.OutputHeight
 			bSize := l.OutputHeight
 			l.WeightStore = poly.NewWeightStore(4 * (ihSize + hhSize + bSize))
+		} else if lType == poly.LayerMultiHeadAttention {
+			l.DModel = 128
+			l.NumHeads = 4
+			l.NumKVHeads = 4
+			l.HeadDim = 32
+			l.MaxSeqLen = 512
+			kvDim := l.NumKVHeads * l.HeadDim
+			l.WeightStore = poly.NewWeightStore(2*(l.DModel*l.DModel+l.DModel) + 2*(l.DModel*kvDim+kvDim))
+		} else if lType == poly.LayerRNN {
+			l.InputHeight = 128
+			l.OutputHeight = 128
+			l.SeqLength = 16
+			ihSize := l.OutputHeight * l.InputHeight
+			hhSize := l.OutputHeight * l.OutputHeight
+			bSize := l.OutputHeight
+			l.WeightStore = poly.NewWeightStore(ihSize + hhSize + bSize)
+		} else if lType == poly.LayerRMSNorm {
+			l.OutputHeight = 1024
+			l.WeightStore = poly.NewWeightStore(l.OutputHeight)
+		} else if lType == poly.LayerLayerNorm {
+			l.OutputHeight = 1024
+			l.WeightStore = poly.NewWeightStore(2 * l.OutputHeight)
+		} else if lType == poly.LayerResidual {
+			l.OutputHeight = 1024
+			l.WeightStore = poly.NewWeightStore(0)
+		} else if lType == poly.LayerSequential {
+			l.SequentialLayers = []poly.VolumetricLayer{
+				{Type: poly.LayerDense, InputHeight: 256, OutputHeight: 256, WeightStore: poly.NewWeightStore(256 * 256)},
+				{Type: poly.LayerDense, InputHeight: 256, OutputHeight: 256, WeightStore: poly.NewWeightStore(256 * 256)},
+			}
+			l.WeightStore = poly.NewWeightStore(0)
+		} else if lType == poly.LayerSwiGLU {
+			l.InputHeight = 128
+			l.OutputHeight = 256
+			ihSize := 128 * 256
+			l.WeightStore = poly.NewWeightStore(3*ihSize + 2*256 + 128)
 		} else {
 			l.InputHeight = inputSize
 			l.OutputHeight = outputSize
@@ -256,6 +378,22 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 		hhSize := outputSize * outputSize
 		bSize := outputSize
 		baselineWeights = mixedDepth * 4 * (ihSize + hhSize + bSize)
+	} else if lType == poly.LayerMultiHeadAttention {
+		dModel := 128
+		kvDim := 128
+		baselineWeights = mixedDepth * (2*(dModel*dModel+dModel) + 2*(dModel*kvDim+kvDim))
+	} else if lType == poly.LayerRMSNorm {
+		baselineWeights = mixedDepth * 1024
+	} else if lType == poly.LayerLayerNorm {
+		baselineWeights = mixedDepth * 2048
+	} else if lType == poly.LayerRNN {
+		baselineWeights = mixedDepth * (128*128 + 128*128 + 128)
+	} else if lType == poly.LayerResidual {
+		baselineWeights = 0
+	} else if lType == poly.LayerSequential {
+		baselineWeights = mixedDepth * (256*256 + 256*256)
+	} else if lType == poly.LayerSwiGLU {
+		baselineWeights = mixedDepth * (128*256*3 + 256*2 + 128)
 	}
 	currentBaseline := (float64(baselineWeights) * 4) / 1024.0
 	res.PctSaved = (1.0 - (res.SizeKb / currentBaseline)) * 100.0
@@ -289,9 +427,21 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch int, lType po
 			input.Data[i] = float32(i % 1024)
 		}
 		gradOut = poly.NewTensor[float32](batch, 64, 256)
-	} else if lType == poly.LayerLSTM {
+	} else if lType == poly.LayerLSTM || lType == poly.LayerRNN {
 		input = poly.NewTensor[float32](batch, 16, 128) // seqLen=16, inputSize=128
 		gradOut = poly.NewTensor[float32](batch, 16, 256) // seqLen=16, hiddenSize=256
+		if lType == poly.LayerRNN {
+			gradOut = poly.NewTensor[float32](batch, 16, 128)
+		}
+	} else if lType == poly.LayerMultiHeadAttention {
+		input = poly.NewTensor[float32](batch, 16, 128) // seqLen=16, dModel=128
+		gradOut = poly.NewTensor[float32](batch, 16, 128)
+	} else if lType == poly.LayerRMSNorm || lType == poly.LayerLayerNorm || lType == poly.LayerResidual {
+		input = poly.NewTensor[float32](batch, 1024)
+		gradOut = poly.NewTensor[float32](batch, 1024)
+	} else if lType == poly.LayerSwiGLU {
+		input = poly.NewTensor[float32](batch, 128)
+		gradOut = poly.NewTensor[float32](batch, 128)
 	} else {
 		input = poly.NewTensor[float32](batch, in)
 		gradOut = poly.NewTensor[float32](batch, out)
@@ -300,88 +450,87 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch int, lType po
 	sizeBytes := net.CalculateTotalMemory()
 	sizeKb := float64(sizeBytes) / 1024.0
 
+	depth := len(net.Layers)
 	// 1. Standard Forward
-	net.UseTiling = false
-	for i := range net.Layers {
-		net.Layers[i].UseTiling = false
-	}
+	var fwdAvg, fwdTiledAvg, bwdAvg time.Duration
 
-	// Warmup
-	poly.ForwardPolymorphic(net, input)
-
-	var totalLayerForward time.Duration
+	// Standard Forward
+	var preActs, postActs []*poly.Tensor[float32]
 	start := time.Now()
 	for i := 0; i < iter; i++ {
-		_, _, layerTimes := poly.ForwardPolymorphic(net, input)
-		for _, d := range layerTimes {
-			totalLayerForward += d
+		currentInput := input
+		for d := 0; d < depth; d++ {
+			layer := &net.Layers[d]
+			layer.UseTiling = false
+			var pre, post *poly.Tensor[float32]
+			if lType == poly.LayerResidual {
+				// For benchmark purposes, use input as skip
+				pre, post = poly.ResidualForwardPolymorphic(layer, currentInput, currentInput)
+			} else {
+				pre, post = poly.DispatchLayer(layer, currentInput, nil)
+			}
+			if i == 0 {
+				preActs = append(preActs, pre)
+				postActs = append(postActs, post)
+			}
+			currentInput = post
 		}
 	}
-	fwd := time.Since(start) / time.Duration(iter)
-	avgLayerForward := totalLayerForward / time.Duration(iter)
+	fwdAvg = time.Since(start) / time.Duration(iter)
 
 	// 2. Tiled Forward
-	net.UseTiling = true
-	optTile := poly.CalculateOptimalTileSize(in)
-	for i := range net.Layers {
-		net.Layers[i].UseTiling = true
-		net.Layers[i].TileSize = optTile
-	}
-
-	// Warmup
-	poly.ForwardPolymorphic(net, input)
-
 	start = time.Now()
 	for i := 0; i < iter; i++ {
-		poly.ForwardPolymorphic(net, input)
-	}
-	fwdTile := time.Since(start) / time.Duration(iter)
-
-	// Reset for training/backward
-	net.UseTiling = false
-	for i := range net.Layers {
-		net.Layers[i].UseTiling = false
-	}
-
-	// 3. Backward / Training
-	start = time.Now()
-	for i := 0; i < iter; i++ {
-		hist_in := make([]*poly.Tensor[float32], len(net.Layers))
-		hist_pre := make([]*poly.Tensor[float32], len(net.Layers))
-		curr := input
-		for idx := range net.Layers {
-			l := &net.Layers[idx]
-			hist_in[idx] = curr
-			pre, post := poly.DispatchLayer(l, curr, nil)
-			hist_pre[idx] = pre
-			curr = post
-		}
-		_, grads, _ := poly.BackwardPolymorphic(net, gradOut, hist_in, hist_pre)
-
-		// REAL WEIGHT UPDATE
-		lr := float32(0.001)
-		for idx := range net.Layers {
-			l := &net.Layers[idx]
-			if l.WeightStore != nil && grads[idx][1] != nil {
-				gW := poly.ConvertTensor[float32, float32](grads[idx][1])
-				l.WeightStore.ApplyGradients(gW, lr)
+		currentInput := input
+		for d := 0; d < depth; d++ {
+			layer := &net.Layers[d]
+			layer.UseTiling = true
+			layer.TileSize = 1024
+			var post *poly.Tensor[float32]
+			if lType == poly.LayerResidual {
+				_, post = poly.ResidualForwardPolymorphic(layer, currentInput, currentInput)
+			} else {
+				_, post = poly.DispatchLayer(layer, currentInput, nil)
 			}
+			currentInput = post
 		}
 	}
-	bwd := time.Since(start) / time.Duration(iter)
+	fwdTiledAvg = time.Since(start) / time.Duration(iter)
 
-	simTaxPct := 0.0
-	if fwd > 0 {
-		simTaxPct = (1.0 - (float64(avgLayerForward) / float64(fwd))) * 100.0
+	// 3. Backward
+	start = time.Now()
+	for i := 0; i < iter; i++ {
+		currentGrad := gradOut
+		for d := depth - 1; d >= 0; d-- {
+			layer := &net.Layers[d]
+			var in *poly.Tensor[float32]
+			if d == 0 {
+				in = input
+			} else {
+				in = postActs[d-1]
+			}
+			var gIn *poly.Tensor[float32]
+			if lType == poly.LayerResidual {
+				gIn, _ = poly.ResidualBackwardPolymorphic(layer, currentGrad, in, preActs[d])
+			} else if lType == poly.LayerSequential {
+				gIn, _ = poly.SequentialBackwardPolymorphic(layer, currentGrad, in, preActs[d])
+			} else if lType == poly.LayerSwiGLU {
+				gIn, _ = poly.SwiGLUBackwardPolymorphic(layer, currentGrad, in, preActs[d])
+			} else {
+				gIn, _ = poly.DispatchLayerBackward(layer, currentGrad, in, nil, preActs[d])
+			}
+			currentGrad = gIn
+		}
 	}
+	bwdAvg = time.Since(start) / time.Duration(iter)
 
 	return Result{
 		Label:       label,
-		Forward:     fwd,
-		ForwardTile: fwdTile,
-		Backward:    bwd,
-		Total:       fwd + bwd,
+		Forward:     fwdAvg,
+		ForwardTile: fwdTiledAvg,
+		Backward:    bwdAvg,
+		Total:       fwdAvg + bwdAvg,
 		SizeKb:      sizeKb,
-		SimTax:      simTaxPct,
+		SimTax:      0.0,
 	}
 }
