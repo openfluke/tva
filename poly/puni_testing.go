@@ -1,7 +1,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openfluke/loom/poly"
@@ -19,6 +21,11 @@ type Result struct {
 }
 
 func main() {
+	layerFlag := flag.String("layer", "all", "Specify layer to benchmark (all, dense, cnn1, cnn2, cnn3, embedding)")
+	flag.Parse()
+
+	target := strings.ToLower(*layerFlag)
+
 	fmt.Println("=== M-POLY-VTD Truly Exhaustive Multi-Numerical Benchmark ===")
 
 	allTypes := []struct {
@@ -49,16 +56,29 @@ func main() {
 	}
 
 	// 1. DENSE BENCHMARKS
-	runBenchSet("DENSE", poly.LayerDense, allTypes)
+	if target == "all" || target == "dense" {
+		runBenchSet("DENSE", poly.LayerDense, allTypes)
+	}
 
 	// 2. CNN3 BENCHMARKS
-	runBenchSet("CNN3", poly.LayerCNN3, allTypes)
+	if target == "all" || target == "cnn3" {
+		runBenchSet("CNN3", poly.LayerCNN3, allTypes)
+	}
 
 	// 3. CNN2 BENCHMARKS
-	runBenchSet("CNN2", poly.LayerCNN2, allTypes)
+	if target == "all" || target == "cnn2" {
+		runBenchSet("CNN2", poly.LayerCNN2, allTypes)
+	}
 
 	// 4. CNN1 BENCHMARKS
-	runBenchSet("CNN1", poly.LayerCNN1, allTypes)
+	if target == "all" || target == "cnn1" {
+		runBenchSet("CNN1", poly.LayerCNN1, allTypes)
+	}
+
+	// 5. EMBEDDING BENCHMARKS
+	if target == "all" || target == "embedding" {
+		runBenchSet("EMBEDDING", poly.LayerEmbedding, allTypes)
+	}
 }
 
 func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
@@ -70,6 +90,9 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 	batchSize := 1
 	iterations := 20
 	depth := 4
+	if lType == poly.LayerEmbedding {
+		depth = 1
+	}
 
 	// Dimensions
 	inputSize := 256
@@ -123,6 +146,10 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 				l.Padding = 1
 				l.OutputHeight = 64
 				l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize)
+			} else if lType == poly.LayerEmbedding {
+				l.VocabSize = 1024
+				l.EmbeddingDim = 256
+				l.WeightStore = poly.NewWeightStore(l.VocabSize * l.EmbeddingDim)
 			} else {
 				l.InputHeight = inputSize
 				l.OutputHeight = outputSize
@@ -140,6 +167,9 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 
 	// Hybrid / Mixed
 	mixedDepth := len(allTypes)
+	if lType == poly.LayerEmbedding {
+		mixedDepth = 1
+	}
 	net := poly.NewVolumetricNetwork(1, 1, 1, mixedDepth)
 	for i := 0; i < mixedDepth; i++ {
 		l := net.GetLayer(0, 0, 0, i)
@@ -180,6 +210,10 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 			l.Padding = 1
 			l.OutputHeight = 64
 			l.WeightStore = poly.NewWeightStore(l.Filters * l.InputChannels * l.KernelSize)
+		} else if lType == poly.LayerEmbedding {
+			l.VocabSize = 1024
+			l.EmbeddingDim = 256
+			l.WeightStore = poly.NewWeightStore(l.VocabSize * l.EmbeddingDim)
 		} else {
 			l.InputHeight = inputSize
 			l.OutputHeight = outputSize
@@ -213,6 +247,13 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch int, lType po
 	} else if lType == poly.LayerCNN1 {
 		input = poly.NewTensor[float32](batch, 8, 64)
 		gradOut = poly.NewTensor[float32](batch, 8, 64)
+	} else if lType == poly.LayerEmbedding {
+		input = poly.NewTensor[float32](batch, 64) // seqLen = 64
+		// Fill input with random token IDs
+		for i := 0; i < len(input.Data); i++ {
+			input.Data[i] = float32(i % 1024)
+		}
+		gradOut = poly.NewTensor[float32](batch, 64, 256)
 	} else {
 		input = poly.NewTensor[float32](batch, in)
 		gradOut = poly.NewTensor[float32](batch, out)
