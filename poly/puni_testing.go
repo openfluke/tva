@@ -21,7 +21,7 @@ type Result struct {
 }
 
 func main() {
-	layerFlag := flag.String("layer", "all", "Specify layer to benchmark (all, dense, cnn1, cnn2, cnn3, embedding)")
+	layerFlag := flag.String("layer", "all", "Specify layer to benchmark (all, dense, cnn1, cnn2, cnn3, embedding, lstm)")
 	flag.Parse()
 
 	target := strings.ToLower(*layerFlag)
@@ -79,6 +79,11 @@ func main() {
 	if target == "all" || target == "embedding" {
 		runBenchSet("EMBEDDING", poly.LayerEmbedding, allTypes)
 	}
+
+	// 6. LSTM BENCHMARKS
+	if target == "all" || target == "lstm" {
+		runBenchSet("LSTM", poly.LayerLSTM, allTypes)
+	}
 }
 
 func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
@@ -90,7 +95,7 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 	batchSize := 1
 	iterations := 20
 	depth := 4
-	if lType == poly.LayerEmbedding {
+	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM {
 		depth = 1
 	}
 
@@ -150,6 +155,14 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 				l.VocabSize = 1024
 				l.EmbeddingDim = 256
 				l.WeightStore = poly.NewWeightStore(l.VocabSize * l.EmbeddingDim)
+			} else if lType == poly.LayerLSTM {
+				l.InputHeight = 128
+				l.OutputHeight = 256
+				l.SeqLength = 16
+				ihSize := l.OutputHeight * l.InputHeight
+				hhSize := l.OutputHeight * l.OutputHeight
+				bSize := l.OutputHeight
+				l.WeightStore = poly.NewWeightStore(4 * (ihSize + hhSize + bSize))
 			} else {
 				l.InputHeight = inputSize
 				l.OutputHeight = outputSize
@@ -160,14 +173,21 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 		res := runBenchmark(s.Label, net, batchSize, lType, inputSize, outputSize, iterations)
 
 		// Calculate PctSaved
-		baselineSize := float64(depth*(inputSize*outputSize)*4) / 1024.0
+		baselineWeights := depth * inputSize * outputSize
+		if lType == poly.LayerLSTM {
+			ihSize := outputSize * inputSize
+			hhSize := outputSize * outputSize
+			bSize := outputSize
+			baselineWeights = depth * 4 * (ihSize + hhSize + bSize)
+		}
+		baselineSize := float64(baselineWeights*4) / 1024.0
 		res.PctSaved = (1.0 - (res.SizeKb / baselineSize)) * 100.0
 		resList = append(resList, res)
 	}
 
 	// Hybrid / Mixed
 	mixedDepth := len(allTypes)
-	if lType == poly.LayerEmbedding {
+	if lType == poly.LayerEmbedding || lType == poly.LayerLSTM {
 		mixedDepth = 1
 	}
 	net := poly.NewVolumetricNetwork(1, 1, 1, mixedDepth)
@@ -214,6 +234,14 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 			l.VocabSize = 1024
 			l.EmbeddingDim = 256
 			l.WeightStore = poly.NewWeightStore(l.VocabSize * l.EmbeddingDim)
+		} else if lType == poly.LayerLSTM {
+			l.InputHeight = 64
+			l.OutputHeight = 64
+			l.SeqLength = 8
+			ihSize := l.OutputHeight * l.InputHeight
+			hhSize := l.OutputHeight * l.OutputHeight
+			bSize := l.OutputHeight
+			l.WeightStore = poly.NewWeightStore(4 * (ihSize + hhSize + bSize))
 		} else {
 			l.InputHeight = inputSize
 			l.OutputHeight = outputSize
@@ -222,7 +250,14 @@ func runBenchSet(title string, lType poly.LayerType, allTypes []struct {
 		l.WeightStore.Scale = 0.01
 	}
 	res := runBenchmark("Exhaustive Multi-Type", net, batchSize, lType, inputSize, outputSize, iterations)
-	currentBaseline := (float64(len(allTypes)) * (float64(inputSize*outputSize) * 4)) / 1024.0
+	baselineWeights := mixedDepth * inputSize * outputSize
+	if lType == poly.LayerLSTM {
+		ihSize := outputSize * inputSize
+		hhSize := outputSize * outputSize
+		bSize := outputSize
+		baselineWeights = mixedDepth * 4 * (ihSize + hhSize + bSize)
+	}
+	currentBaseline := (float64(baselineWeights) * 4) / 1024.0
 	res.PctSaved = (1.0 - (res.SizeKb / currentBaseline)) * 100.0
 	resList = append(resList, res)
 
@@ -254,6 +289,9 @@ func runBenchmark(label string, net *poly.VolumetricNetwork, batch int, lType po
 			input.Data[i] = float32(i % 1024)
 		}
 		gradOut = poly.NewTensor[float32](batch, 64, 256)
+	} else if lType == poly.LayerLSTM {
+		input = poly.NewTensor[float32](batch, 16, 128) // seqLen=16, inputSize=128
+		gradOut = poly.NewTensor[float32](batch, 16, 256) // seqLen=16, hiddenSize=256
 	} else {
 		input = poly.NewTensor[float32](batch, in)
 		gradOut = poly.NewTensor[float32](batch, out)
