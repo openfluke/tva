@@ -56,7 +56,7 @@ func runFinalExhaustiveTest(lName, dName string) error {
 	for i := range net1.Layers {
 		l := &net1.Layers[i]
 		if l.WeightStore != nil {
-			l.WeightStore.Randomize(seed)
+			l.WeightStore.Randomize(seed, 0.1)
 			
 			// Morph and Unpack net1 so it matches the state net2 will have after loading
 			// This ensures we are testing the serialization of the DType, not FP32->DType conversion

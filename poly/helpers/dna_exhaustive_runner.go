@@ -147,7 +147,7 @@ func testPermutation(lName, dName string) (ident, perturbed, layerPerturbed floa
 		}
 	}
 	if net3.Layers[1].WeightStore != nil {
-		net3.Layers[1].WeightStore.Randomize(time.Now().UnixNano())
+		net3.Layers[1].WeightStore.Randomize(time.Now().UnixNano(), 0.1)
 	} else {
 		net3.Layers[1].DType = poly.DTypeInt4 // Change DType to simulate deep perturbation
 	}

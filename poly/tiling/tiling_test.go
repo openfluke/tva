@@ -26,7 +26,7 @@ func TestTilingFidelity(t *testing.T) {
 			WeightStore:   poly.NewWeightStore(filters * inC * kSize * kSize),
 			TileSize:      8,
 		}
-		layer.WeightStore.Randomize(42)
+		layer.WeightStore.Randomize(42, 0.1)
 		return layer
 	}
 
@@ -79,7 +79,7 @@ func BenchmarkCNNTiling(b *testing.B) {
 			WeightStore:   poly.NewWeightStore(wCount),
 			TileSize:      8,
 		}
-		layer.WeightStore.Randomize(42)
+		layer.WeightStore.Randomize(42, 0.1)
 		return layer
 	}
 

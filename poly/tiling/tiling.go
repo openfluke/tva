@@ -48,7 +48,7 @@ func runCNNBenchmarks() {
 			WeightStore:   poly.NewWeightStore(wCount),
 			TileSize:      8,
 		}
-		layer.WeightStore.Randomize(42)
+		layer.WeightStore.Randomize(42, 0.1)
 		return layer
 	}
 

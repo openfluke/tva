@@ -53,7 +53,7 @@ func main() {
 		}
 		
 		// Initialize weights and triggers metamorphosis
-		layer.WeightStore.Randomize(42)
+		layer.WeightStore.Randomize(42, 0.1)
 		layer.WeightStore.Morph(dt)
 		
 		memMB := float64(layer.WeightStore.SizeInBytes(dt)) / (1024 * 1024)

@@ -424,7 +424,7 @@ func createNetwork(lType poly.LayerType) *poly.VolumetricNetwork {
 
 		if wCount > 0 {
 			l.WeightStore = poly.NewWeightStore(wCount)
-			l.WeightStore.Randomize(time.Now().UnixNano())
+			l.WeightStore.Randomize(time.Now().UnixNano(), 0.1)
 		}
 		
 		currentIn = outDim

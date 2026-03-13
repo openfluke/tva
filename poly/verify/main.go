@@ -21,7 +21,7 @@ func main() {
 	l0.InputHeight = inSize
 	l0.OutputHeight = hiddenSize
 	l0.WeightStore = poly.NewWeightStore(inSize * hiddenSize)
-	l0.WeightStore.Randomize(42)
+	l0.WeightStore.Randomize(42, 0.1)
 	
 	// Layer 1: Output
 	l1 := net.GetLayer(0, 0, 0, 1)
@@ -30,7 +30,7 @@ func main() {
 	l1.InputHeight = hiddenSize
 	l1.OutputHeight = outSize
 	l1.WeightStore = poly.NewWeightStore(hiddenSize * outSize)
-	l1.WeightStore.Randomize(43)
+	l1.WeightStore.Randomize(43, 0.1)
 
 	// 2. Create Dummy Training Data (Identity-ish)
 	batch := poly.TrainingBatch[float32]{

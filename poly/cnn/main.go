@@ -82,7 +82,7 @@ func runAllBenchmarks(title string, depth, iterations, batchSize int, setupFunc 
 				if l.Type == poly.LayerCNN2 { size *= l.KernelSize }
 				if l.Type == poly.LayerCNN3 { size *= l.KernelSize * l.KernelSize }
 				l.WeightStore = poly.NewWeightStore(size)
-				l.WeightStore.Randomize(42)
+				l.WeightStore.Randomize(42, 0.1)
 			}
 			res := performBenchmark(label, net, iterations, batchSize)
 			results <- res
@@ -108,7 +108,7 @@ func runAllBenchmarks(title string, depth, iterations, batchSize int, setupFunc 
 			if l.Type == poly.LayerCNN2 { size *= l.KernelSize }
 			if l.Type == poly.LayerCNN3 { size *= l.KernelSize * l.KernelSize }
 			l.WeightStore = poly.NewWeightStore(size)
-			l.WeightStore.Randomize(42)
+			l.WeightStore.Randomize(42, 0.1)
 		}
 		res := performBenchmark("Exhaustive Multi-Type", net, iterations, batchSize)
 		results <- res
@@ -156,7 +156,7 @@ func setupCNN1Layer(l *poly.VolumetricLayer) {
 	l.Stride = 1
 	l.Padding = 1
 	l.WeightStore = poly.NewWeightStore(16 * 1 * 3)
-	l.WeightStore.Randomize(42)
+	l.WeightStore.Randomize(42, 0.1)
 }
 
 func setupCNN2Layer(l *poly.VolumetricLayer) {
@@ -171,7 +171,7 @@ func setupCNN2Layer(l *poly.VolumetricLayer) {
 	l.Stride = 1
 	l.Padding = 1
 	l.WeightStore = poly.NewWeightStore(16 * 1 * 9)
-	l.WeightStore.Randomize(42)
+	l.WeightStore.Randomize(42, 0.1)
 }
 
 func setupCNN3Layer(l *poly.VolumetricLayer) {
@@ -188,7 +188,7 @@ func setupCNN3Layer(l *poly.VolumetricLayer) {
 	l.Stride = 1
 	l.Padding = 1
 	l.WeightStore = poly.NewWeightStore(4 * 1 * 27)
-	l.WeightStore.Randomize(42)
+	l.WeightStore.Randomize(42, 0.1)
 }
 
 func performBenchmark(label string, net *poly.VolumetricNetwork, iterations, batchSize int) Result {
