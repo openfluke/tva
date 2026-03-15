@@ -39,8 +39,17 @@ func main() {
 	fmt.Println("| Layer type      | CPU (Simple) | CPU (Tiled)  | GPU (WebGPU) | Speedup (vs Tiled) | Deterministic | Sanity        |")
 	fmt.Println("|-----------------|--------------|--------------|--------------|-------------------|---------------|---------------|")
 
+	type sample struct {
+		Name string
+		CPU  []float32
+		GPU  []float32
+	}
+	var samples []sample
+
 	for _, l := range layers {
-		cpuSimple, cpuTiled, gpuTime, maxDiff, sanity := runBench(l.Type, ctx)
+		cpuSimple, cpuTiled, gpuTime, maxDiff, sanity, cSamp, gSamp := runBench(l.Type, ctx)
+		
+		samples = append(samples, sample{l.Name, cSamp, gSamp})
 		
 		gpuLabel := "N/A"
 		speedup := "N/A"
@@ -71,9 +80,26 @@ func main() {
 		fmt.Printf("| %-15s | %-12v | %-12v | %-12s | %-17s | %-13s | %-13s |\n", 
 			l.Name, cpuSimple, cpuTiled, gpuLabel, speedup, det, san)
 	}
+
+	fmt.Println("\n=== Final Sanity Check: CPU vs GPU Output Samples ===")
+	fmt.Println("| Layer           | CPU Sample (first 3)        | GPU Sample (first 3)        | Status |")
+	fmt.Println("|-----------------|-----------------------------|-----------------------------|--------|")
+	for _, s := range samples {
+		cpuStr := "N/A"
+		gpuStr := "N/A"
+		if len(s.CPU) > 0 {
+			cpuStr = fmt.Sprintf("%.4f, %.4f, %.4f", s.CPU[0], s.CPU[1], s.CPU[2])
+		}
+		if len(s.GPU) > 0 {
+			gpuStr = fmt.Sprintf("%.4f, %.4f, %.4f", s.GPU[0], s.GPU[1], s.GPU[2])
+		}
+		status := "ZERO 💀"
+		for _, v := range s.GPU { if v != 0 { status = "REAL 💎"; break } }
+		fmt.Printf("| %-15s | %-27s | %-27s | %-6s |\n", s.Name, cpuStr, gpuStr, status)
+	}
 }
 
-func runBench(lType poly.LayerType, ctx *poly.WGPUContext) (simple, tiled, gpu time.Duration, maxDiff float64, sanity bool) {
+func runBench(lType poly.LayerType, ctx *poly.WGPUContext) (simple, tiled, gpu time.Duration, maxDiff float64, sanity bool, cpuSample, gpuSample []float32) {
 	iterations := 10
 	
 	// Setup layer
@@ -274,6 +300,11 @@ func runBench(lType poly.LayerType, ctx *poly.WGPUContext) (simple, tiled, gpu t
 		maxDiff = -1.0
 		// Parity & Sanity Check
 		gpuRes, _ := ctx.ReadBuffer(outBuf)
+		if len(gpuRes) >= 3 && len(cpuOut.Data) >= 3 {
+			gpuSample = gpuRes[:3]
+			cpuSample = cpuOut.Data[:3]
+		}
+
 		if len(gpuRes) >= len(cpuOut.Data) && len(cpuOut.Data) > 0 {
 			maxDiff = 0
 			for i := 0; i < 100 && i < len(cpuOut.Data); i++ {
