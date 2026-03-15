@@ -10,260 +10,320 @@ import (
 
 func main() {
 	fmt.Println("=== M-POLY-VTD Multi-Architecture Training Showdown ===")
-	
-	// Set seed for reproducibility
 	rand.Seed(42)
 
-	config := &poly.TrainingConfig{
-		Epochs:       50,
-		LearningRate: 0.1,
+	// Pre-init GPU once and share across all tests to eliminate per-test init overhead.
+	sharedNet := poly.NewVolumetricNetwork(1, 1, 1, 1)
+	gpuInitStart := time.Now()
+	gpuInitErr := sharedNet.InitWGPU()
+	gpuInitTime := time.Since(gpuInitStart)
+	if gpuInitErr != nil {
+		fmt.Printf("⚠️  GPU unavailable: %v — running CPU-only\n", gpuInitErr)
+	} else {
+		fmt.Printf("✅ GPU initialised in %v (shared across all tests)\n\n", gpuInitTime)
+	}
+	sharedCtx := sharedNet.GPUContext // nil if GPU failed
+
+	// All tests use the same config; only per-test batchSize/numBatches differ.
+	baseConfig := &poly.TrainingConfig{
+		Epochs:       20,
+		LearningRate: 0.01,
 		LossType:     "mse",
 		Verbose:      false,
 	}
 
-	// 1. MLP
-	runArchitectureTest("Dense MLP (XOR-like)", createDenseNetwork, generateDenseData, config)
+	fmt.Println("Layers tested: Dense MLP · CNN 1D · CNN 2D · CNN 3D · RMSNorm MLP · Deep Transformer MLP")
+	fmt.Println("(SwiGLU / MHA / Embedding: GPU backward not yet in DispatchBackwardLayer — skipped here)")
+	fmt.Println()
 
-	// 2. CNNs
-	runArchitectureTest("CNN 1D Classifier", createCNN1DNetwork, generateCNN1DData, config)
-	runArchitectureTest("CNN 2D Classifier", createCNN2DNetwork, generateCNN2DData, config)
-	runArchitectureTest("CNN 3D Classifier", createCNN3DNetwork, generateCNN3DData, config)
+	// ── 1. Large Dense MLP ──────────────────────────────────────────────────
+	runTest("Dense MLP (128→512→512→8)",
+		func() *poly.VolumetricNetwork { return createLargeDenseNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{128}, []int{8}) },
+		baseConfig, sharedCtx,
+		8,  // numBatches
+		64, // batchSize
+	)
 
-	// 3. Normalization
-	runArchitectureTest("RMSNorm MLP", createNormalizedNetwork, generateDenseData, config)
+	// ── 2. Large CNN 1D ──────────────────────────────────────────────────────
+	runTest("CNN 1D (3ch×128→32f→64f→Dense→8)",
+		func() *poly.VolumetricNetwork { return createLargeCNN1DNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{3, 128}, []int{8}) },
+		baseConfig, sharedCtx,
+		8, 32,
+	)
+
+	// ── 3. Large CNN 2D ──────────────────────────────────────────────────────
+	runTest("CNN 2D (3ch×32×32→16f→32f→Dense→8)",
+		func() *poly.VolumetricNetwork { return createLargeCNN2DNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{3, 32, 32}, []int{8}) },
+		baseConfig, sharedCtx,
+		8, 16,
+	)
+
+	// ── 4. Large CNN 3D ──────────────────────────────────────────────────────
+	runTest("CNN 3D (2ch×8×8×8→8f→Dense→8)",
+		func() *poly.VolumetricNetwork { return createLargeCNN3DNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{2, 8, 8, 8}, []int{8}) },
+		baseConfig, sharedCtx,
+		8, 8,
+	)
+
+	// ── 5. RMSNorm MLP ───────────────────────────────────────────────────────
+	runTest("RMSNorm MLP (128→Dense512→Norm→Dense512→8)",
+		func() *poly.VolumetricNetwork { return createRMSNormNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{128}, []int{8}) },
+		baseConfig, sharedCtx,
+		8, 64,
+	)
+
+	// ── 6. Deep Dense MLP ────────────────────────────────────────────────────
+	runTest("Deep Dense MLP (128→512→512→512→512→8)",
+		func() *poly.VolumetricNetwork { return createDeepDenseNet() },
+		func(nb, bs int) []poly.TrainingBatch[float32] { return synth(nb, bs, []int{128}, []int{8}) },
+		baseConfig, sharedCtx,
+		8, 64,
+	)
 }
 
-func runArchitectureTest(name string, netFactory func() *poly.VolumetricNetwork, dataFactory func(int, int) []poly.TrainingBatch[float32], config *poly.TrainingConfig) {
-	fmt.Printf("\n--- Testing Architecture: %s ---\n", name)
+// ── Runner ────────────────────────────────────────────────────────────────────
 
-	numBatches := 10
-	batchSize := 8
-	batches := dataFactory(numBatches, batchSize)
-	
-	nCPU := netFactory()
-	nGPU := netFactory()
-	
-	// Parity Sync
+func runTest(
+	name string,
+	netFn func() *poly.VolumetricNetwork,
+	dataFn func(int, int) []poly.TrainingBatch[float32],
+	cfg *poly.TrainingConfig,
+	sharedCtx *poly.WGPUContext,
+	numBatches, batchSize int,
+) {
+	fmt.Printf("--- %s ---\n", name)
+
+	batches := dataFn(numBatches, batchSize)
+
+	// CPU
+	nCPU := netFn()
+	cfg.UseGPU = false
+	tCPU := time.Now()
+	resCPU, err := poly.Train(nCPU, batches, cfg)
+	cpuDur := time.Since(tCPU)
+	if err != nil {
+		fmt.Printf("  CPU error: %v\n\n", err)
+		return
+	}
+
+	// GPU — share the pre-initialised context
+	if sharedCtx == nil {
+		fmt.Printf("  CPU: %v | GPU: skipped (no device)\n\n", cpuDur)
+		return
+	}
+	nGPU := netFn()
+	// Copy weights so both networks start identically
 	for i := range nCPU.Layers {
-		if nCPU.Layers[i].WeightStore != nil {
+		if nCPU.Layers[i].WeightStore != nil && nGPU.Layers[i].WeightStore != nil {
 			copy(nGPU.Layers[i].WeightStore.Master, nCPU.Layers[i].WeightStore.Master)
 		}
 	}
+	nGPU.GPUContext = sharedCtx
+	nGPU.UseGPU = true
+	// SyncToGPU so weights land in VRAM before training starts
+	if err := nGPU.SyncToGPU(); err != nil {
+		fmt.Printf("  GPU sync error: %v\n\n", err)
+		return
+	}
 
-	// 1. CPU
-	fmt.Print("[CPU] Training...")
-	startCPU := time.Now()
-	resCPU, err := poly.Train(nCPU, batches, config)
-	if err != nil { fmt.Printf(" Error: %v\n", err); return }
-	cpuDuration := time.Since(startCPU)
-	fmt.Printf(" Done (%v)\n", cpuDuration)
-
-	// 2. GPU
-	fmt.Print("[GPU] Training...")
-	config.UseGPU = true
-	startGPU := time.Now()
-	resGPU, err := poly.Train(nGPU, batches, config)
-	if err != nil { fmt.Printf(" Error: %v\n", err); return }
-	gpuDuration := time.Since(startGPU)
-	fmt.Printf(" Done (%v)\n", gpuDuration)
-	config.UseGPU = false // Reset for next test
+	cfg.UseGPU = true
+	tGPU := time.Now()
+	resGPU, err := poly.Train(nGPU, batches, cfg)
+	gpuDur := time.Since(tGPU)
+	cfg.UseGPU = false
+	if err != nil {
+		fmt.Printf("  GPU error: %v\n\n", err)
+		return
+	}
 
 	// Results
-	initialLoss := resCPU.LossHistory[0]
-	finalLossCPU := resCPU.LossHistory[len(resCPU.LossHistory)-1]
-	finalLossGPU := resGPU.LossHistory[len(resGPU.LossHistory)-1]
-	
-	cpuImprov := (initialLoss - finalLossCPU) / initialLoss * 100
-	gpuImprov := (initialLoss - finalLossGPU) / initialLoss * 100
+	initLoss := resCPU.LossHistory[0]
+	finalCPU := resCPU.LossHistory[len(resCPU.LossHistory)-1]
+	finalGPU := resGPU.LossHistory[len(resGPU.LossHistory)-1]
+	cpuImprv := 0.0
+	gpuImprv := 0.0
+	if initLoss > 0 {
+		cpuImprv = (initLoss - finalCPU) / initLoss * 100
+		gpuImprv = (initLoss - finalGPU) / initLoss * 100
+	}
+	speedup := float64(cpuDur) / float64(gpuDur)
 
-	fmt.Printf("| Metric      | CPU         | GPU         | Improvement |\n")
-	fmt.Printf("|-------------|-------------|-------------|-------------|\n")
-	fmt.Printf("| Final Loss  | %-11.6f | %-11.6f | CPU: %.1f%% |\n", finalLossCPU, finalLossGPU, cpuImprov)
-	fmt.Printf("| Gain %%      |             |             | GPU: %.1f%% |\n", gpuImprov)
-	
-	speedup := float64(cpuDuration) / float64(gpuDuration)
-	fmt.Printf("Speedup: %.2fx\n", speedup)
+	fmt.Printf("  | %-12s | %-14s | %-14s | %-8s |\n", "Metric", "CPU", "GPU", "")
+	fmt.Printf("  | %-12s | %-14v | %-14v | Speedup: %.2fx |\n", "Time", cpuDur.Round(time.Millisecond), gpuDur.Round(time.Millisecond), speedup)
+	fmt.Printf("  | %-12s | %-14.6f | %-14.6f | CPU: %+.1f%% / GPU: %+.1f%% |\n", "Final Loss", finalCPU, finalGPU, cpuImprv, gpuImprv)
+	fmt.Println()
 }
 
-// Architecture Factories
+// ── Network Factories ─────────────────────────────────────────────────────────
 
-func createDenseNetwork() *poly.VolumetricNetwork {
-	n := poly.NewVolumetricNetwork(1, 1, 1, 2)
-	setupDense(n.GetLayer(0, 0, 0, 0), 2, 8, poly.ActivationReLU)
-	setupDense(n.GetLayer(0, 0, 0, 1), 8, 1, poly.ActivationLinear)
-	randomizeNetwork(n)
+func createLargeDenseNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 3)
+	setupDenseL(n.GetLayer(0, 0, 0, 0), 128, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 1), 512, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 2), 512, 8, poly.ActivationLinear)
+	randNet(n)
 	return n
 }
 
-func createCNN2DNetwork() *poly.VolumetricNetwork {
-	// Simple CNN: 1x8x8 Input -> CNN2D (3x3, filters=4) -> Flatten -> Dense
-	n := poly.NewVolumetricNetwork(1, 1, 1, 2)
-	
+func createDeepDenseNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 5)
+	setupDenseL(n.GetLayer(0, 0, 0, 0), 128, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 1), 512, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 2), 512, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 3), 512, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 4), 512, 8, poly.ActivationLinear)
+	randNet(n)
+	return n
+}
+
+func createLargeCNN1DNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 3)
+
 	l0 := n.GetLayer(0, 0, 0, 0)
-	l0.Type = poly.LayerCNN2
-	l0.InputChannels = 1
-	l0.InputHeight = 8
-	l0.InputWidth = 8
-	l0.Filters = 4
+	l0.Type = poly.LayerCNN1
+	l0.InputChannels = 3
+	l0.InputHeight = 128
+	l0.Filters = 32
 	l0.KernelSize = 3
 	l0.Stride = 1
 	l0.Padding = 1
+	l0.OutputHeight = 128
+	l0.Activation = poly.ActivationReLU
+	l0.WeightStore = poly.NewWeightStore(32 * 3 * 3)
+
+	l1 := n.GetLayer(0, 0, 0, 1)
+	l1.Type = poly.LayerCNN1
+	l1.InputChannels = 32
+	l1.InputHeight = 128
+	l1.Filters = 64
+	l1.KernelSize = 3
+	l1.Stride = 1
+	l1.Padding = 1
+	l1.OutputHeight = 128
+	l1.Activation = poly.ActivationReLU
+	l1.WeightStore = poly.NewWeightStore(64 * 32 * 3)
+
+	setupDenseL(n.GetLayer(0, 0, 0, 2), 64*128, 8, poly.ActivationLinear)
+	randNet(n)
+	return n
+}
+
+func createLargeCNN2DNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 3)
+
+	l0 := n.GetLayer(0, 0, 0, 0)
+	l0.Type = poly.LayerCNN2
+	l0.InputChannels = 3
+	l0.InputHeight = 32
+	l0.InputWidth = 32
+	l0.Filters = 16
+	l0.KernelSize = 3
+	l0.Stride = 1
+	l0.Padding = 1
+	l0.OutputHeight = 32
+	l0.OutputWidth = 32
+	l0.Activation = poly.ActivationReLU
+	l0.WeightStore = poly.NewWeightStore(16 * 3 * 3 * 3)
+
+	l1 := n.GetLayer(0, 0, 0, 1)
+	l1.Type = poly.LayerCNN2
+	l1.InputChannels = 16
+	l1.InputHeight = 32
+	l1.InputWidth = 32
+	l1.Filters = 32
+	l1.KernelSize = 3
+	l1.Stride = 1
+	l1.Padding = 1
+	l1.OutputHeight = 32
+	l1.OutputWidth = 32
+	l1.Activation = poly.ActivationReLU
+	l1.WeightStore = poly.NewWeightStore(32 * 16 * 3 * 3)
+
+	setupDenseL(n.GetLayer(0, 0, 0, 2), 32*32*32, 8, poly.ActivationLinear)
+	randNet(n)
+	return n
+}
+
+func createLargeCNN3DNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 2)
+
+	l0 := n.GetLayer(0, 0, 0, 0)
+	l0.Type = poly.LayerCNN3
+	l0.InputChannels = 2
+	l0.InputDepth = 8
+	l0.InputHeight = 8
+	l0.InputWidth = 8
+	l0.Filters = 8
+	l0.KernelSize = 3
+	l0.Stride = 1
+	l0.Padding = 1
+	l0.OutputDepth = 8
 	l0.OutputHeight = 8
 	l0.OutputWidth = 8
 	l0.Activation = poly.ActivationReLU
-	l0.WeightStore = poly.NewWeightStore(4 * 1 * 3 * 3)
-	
-	l1 := n.GetLayer(0, 0, 0, 1)
-	setupDense(l1, 4*8*8, 1, poly.ActivationLinear)
-	
-	randomizeNetwork(n)
+	l0.WeightStore = poly.NewWeightStore(8 * 2 * 3 * 3 * 3)
+
+	setupDenseL(n.GetLayer(0, 0, 0, 1), 8*8*8*8, 8, poly.ActivationLinear)
+	randNet(n)
 	return n
 }
 
-func createNormalizedNetwork() *poly.VolumetricNetwork {
-	n := poly.NewVolumetricNetwork(1, 1, 1, 3)
-	setupDense(n.GetLayer(0, 0, 0, 0), 2, 16, poly.ActivationLinear)
-	
+func createRMSNormNet() *poly.VolumetricNetwork {
+	n := poly.NewVolumetricNetwork(1, 1, 1, 4)
+	setupDenseL(n.GetLayer(0, 0, 0, 0), 128, 512, poly.ActivationLinear)
+
 	lNorm := n.GetLayer(0, 0, 0, 1)
 	lNorm.Type = poly.LayerRMSNorm
-	lNorm.InputHeight = 16
-	lNorm.OutputHeight = 16
-	lNorm.WeightStore = poly.NewWeightStore(16)
-	
-	setupDense(n.GetLayer(0, 0, 0, 2), 16, 1, poly.ActivationLinear)
-	
-	randomizeNetwork(n)
+	lNorm.InputHeight = 512
+	lNorm.OutputHeight = 512
+	lNorm.WeightStore = poly.NewWeightStore(512)
+
+	setupDenseL(n.GetLayer(0, 0, 0, 2), 512, 512, poly.ActivationReLU)
+	setupDenseL(n.GetLayer(0, 0, 0, 3), 512, 8, poly.ActivationLinear)
+	randNet(n)
 	return n
 }
 
-// Data Generators
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
-func generateDenseData(numBatches, batchSize int) []poly.TrainingBatch[float32] {
-	batches := make([]poly.TrainingBatch[float32], numBatches)
-	for i := 0; i < numBatches; i++ {
-		input := poly.NewTensor[float32](batchSize, 2)
-		target := poly.NewTensor[float32](batchSize, 1)
-		for j := 0; j < batchSize; j++ {
-			x1, x2 := rand.Float32(), rand.Float32()
-			input.Data[j*2] = x1
-			input.Data[j*2+1] = x2
-			if x1+x2 > 1.0 { target.Data[j] = 1.0 } else { target.Data[j] = 0.0 }
-		}
-		batches[i] = poly.TrainingBatch[float32]{Input: input, Target: target}
-	}
-	return batches
-}
-
-func generateCNN2DData(numBatches, batchSize int) []poly.TrainingBatch[float32] {
-	batches := make([]poly.TrainingBatch[float32], numBatches)
-	for i := 0; i < numBatches; i++ {
-		input := poly.NewTensor[float32](batchSize, 1, 8, 8)
-		target := poly.NewTensor[float32](batchSize, 1)
-		for j := 0; j < batchSize; j++ {
-			sum := float32(0)
-			for k := 0; k < 64; k++ {
-				v := rand.Float32()
-				input.Data[j*64+k] = v
-				sum += v
-			}
-			if sum > 32.0 { target.Data[j] = 1.0 } else { target.Data[j] = 0.0 }
-		}
-		batches[i] = poly.TrainingBatch[float32]{Input: input, Target: target}
-	}
-	return batches
-}
-
-func createCNN1DNetwork() *poly.VolumetricNetwork {
-	n := poly.NewVolumetricNetwork(1, 1, 1, 2)
-	l0 := n.GetLayer(0, 0, 0, 0)
-	l0.Type = poly.LayerCNN1
-	l0.InputChannels = 1
-	l0.InputHeight = 16
-	l0.Filters = 4
-	l0.KernelSize = 3
-	l0.Stride = 1
-	l0.Padding = 1
-	l0.OutputHeight = 16
-	l0.Activation = poly.ActivationReLU
-	l0.WeightStore = poly.NewWeightStore(4 * 1 * 3)
-	
-	l1 := n.GetLayer(0, 0, 0, 1)
-	setupDense(l1, 4*16, 1, poly.ActivationLinear)
-	
-	randomizeNetwork(n)
-	return n
-}
-
-func generateCNN1DData(numBatches, batchSize int) []poly.TrainingBatch[float32] {
-	return createSyntheticData(numBatches, batchSize, []int{1, 16}, []int{1})
-}
-
-func createCNN3DNetwork() *poly.VolumetricNetwork {
-	n := poly.NewVolumetricNetwork(1, 1, 1, 2)
-	l0 := n.GetLayer(0, 0, 0, 0)
-	l0.Type = poly.LayerCNN3
-	l0.InputChannels = 1
-	l0.InputDepth = 4
-	l0.InputHeight = 4
-	l0.InputWidth = 4
-	l0.Filters = 2
-	l0.KernelSize = 3
-	l0.Stride = 1
-	l0.Padding = 1
-	l0.OutputDepth = 4
-	l0.OutputHeight = 4
-	l0.OutputWidth = 4
-	l0.Activation = poly.ActivationReLU
-	l0.WeightStore = poly.NewWeightStore(2 * 1 * 3 * 3 * 3)
-	
-	l1 := n.GetLayer(0, 0, 0, 1)
-	setupDense(l1, 2*4*4*4, 1, poly.ActivationLinear)
-	
-	randomizeNetwork(n)
-	return n
-}
-
-func generateCNN3DData(numBatches, batchSize int) []poly.TrainingBatch[float32] {
-	return createSyntheticData(numBatches, batchSize, []int{1, 4, 4, 4}, []int{1})
-}
-
-func createSyntheticData(numBatches, batchSize int, inputShape, targetShape []int) []poly.TrainingBatch[float32] {
-	batches := make([]poly.TrainingBatch[float32], numBatches)
-	for b := 0; b < numBatches; b++ {
-		fullInShape := append([]int{batchSize}, inputShape...)
-		fullTargetShape := append([]int{batchSize}, targetShape...)
-		
-		input := poly.NewTensor[float32](fullInShape...)
-		target := poly.NewTensor[float32](fullTargetShape...)
-		
-		for i := range input.Data { input.Data[i] = rand.Float32() }
-		for i := range target.Data { target.Data[i] = rand.Float32() }
-		
-		batches[b] = poly.TrainingBatch[float32]{
-			Input:  input,
-			Target: target,
-		}
-	}
-	return batches
-}
-
-// Helpers
-
-func randomizeNetwork(n *poly.VolumetricNetwork) {
-	for i := range n.Layers {
-		l := &n.Layers[i]
-		if l.WeightStore != nil {
-			for j := range l.WeightStore.Master {
-				l.WeightStore.Master[j] = (rand.Float32()*2 - 1) * 0.1
-			}
-		}
-	}
-}
-
-func setupDense(l *poly.VolumetricLayer, in, out int, act poly.ActivationType) {
+func setupDenseL(l *poly.VolumetricLayer, in, out int, act poly.ActivationType) {
 	l.Type = poly.LayerDense
 	l.InputHeight = in
 	l.OutputHeight = out
 	l.Activation = act
 	l.WeightStore = poly.NewWeightStore(in*out + out)
+}
+
+func randNet(n *poly.VolumetricNetwork) {
+	for i := range n.Layers {
+		l := &n.Layers[i]
+		if l.WeightStore != nil {
+			for j := range l.WeightStore.Master {
+				l.WeightStore.Master[j] = (rand.Float32()*2 - 1) * 0.05
+			}
+		}
+	}
+}
+
+func synth(numBatches, batchSize int, inShape, targetShape []int) []poly.TrainingBatch[float32] {
+	batches := make([]poly.TrainingBatch[float32], numBatches)
+	for b := 0; b < numBatches; b++ {
+		fullIn := append([]int{batchSize}, inShape...)
+		fullTgt := append([]int{batchSize}, targetShape...)
+		inp := poly.NewTensor[float32](fullIn...)
+		tgt := poly.NewTensor[float32](fullTgt...)
+		for i := range inp.Data {
+			inp.Data[i] = rand.Float32()*2 - 1
+		}
+		for i := range tgt.Data {
+			tgt.Data[i] = rand.Float32()*2 - 1
+		}
+		batches[b] = poly.TrainingBatch[float32]{Input: inp, Target: tgt}
+	}
+	return batches
 }

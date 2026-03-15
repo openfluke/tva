@@ -263,14 +263,18 @@ func runTrainBench(lType poly.LayerType, ctx *poly.WGPUContext) (cpu, gpu time.D
 			case poly.LayerResidual:
 				ctx.DispatchResidualBackward(len(gradOutput.Data), goBuf, dxBuf, dwBuf)
 			case poly.LayerMultiHeadAttention:
-				// MHA needs Q, K, V buffers
+				// MHA backward writes separate dQ, dK, dV — not a single dxBuf.
+				// We read dQ back into dxBuf for the parity check so the table shows real output.
 				qBuf, _ := ctx.CreatePersistentBuffer(input.Data, "Q")
 				kBuf, _ := ctx.CreatePersistentBuffer(input.Data, "K")
 				vBuf, _ := ctx.CreatePersistentBuffer(input.Data, "V")
-				dqBuf := ctx.GetActivationBuffer("dQ", uint64(len(input.Data)*4), wgpu.BufferUsageStorage)
+				dqBuf := ctx.GetActivationBuffer("dQ", uint64(len(input.Data)*4), wgpu.BufferUsageStorage|wgpu.BufferUsageCopySrc)
 				dkBuf := ctx.GetActivationBuffer("dK", uint64(len(input.Data)*4), wgpu.BufferUsageStorage)
 				dvBuf := ctx.GetActivationBuffer("dV", uint64(len(input.Data)*4), wgpu.BufferUsageStorage)
+				ctx.Queue.WriteBuffer(dqBuf, 0, make([]byte, uint64(len(input.Data)*4)))
 				ctx.DispatchMHABackward(batchSize, l.NumHeads, l.NumKVHeads, l.HeadDim, l.InputHeight, 1.0, goBuf, qBuf, kBuf, vBuf, dqBuf, dkBuf, dvBuf)
+				// Point dxBuf at dQ so the parity readback below captures MHA output
+				dxBuf = dqBuf
 			case poly.LayerCNN1:
 				wBuf := l.WeightStore.GPUWeights[poly.DTypeFloat32].(*wgpu.Buffer)
 				preBuf, _ := ctx.CreatePersistentBuffer(gradOutput.Data, "preAct")
