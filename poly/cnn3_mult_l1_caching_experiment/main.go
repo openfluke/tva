@@ -7,12 +7,35 @@ import (
 	"github.com/openfluke/loom/poly"
 )
 
-func main() {
-	fmt.Println("=== CNN3 Multi-Core Tiling Experiment ===")
-	
-	iterations := 5
-	
-	// Setup Layer
+type typeConfig struct {
+	name      string
+	dtype     poly.DType
+	scale     float32
+	tolerance float64
+}
+
+type result struct {
+	tNormal    time.Duration
+	tSingle    time.Duration
+	tMulti     time.Duration
+	tileSize   int
+	maxDiff01  float64
+	maxDiff02  float64
+	parity01   bool
+	parity02   bool
+	sample     [3]float32
+}
+
+func runDType(cfg typeConfig, iterations int) result {
+	ws := poly.NewWeightStore(32 * 32 * 3 * 3 * 3)
+	for i := range ws.Master {
+		ws.Master[i] = 0.1
+	}
+	ws.Scale = cfg.scale
+	if cfg.dtype != poly.DTypeFloat32 {
+		ws.Morph(cfg.dtype)
+	}
+
 	l := poly.VolumetricLayer{
 		Network:       poly.NewVolumetricNetwork(1, 1, 1, 1),
 		Type:          poly.LayerCNN3,
@@ -27,90 +50,150 @@ func main() {
 		KernelSize:    3,
 		Stride:        1,
 		Padding:       1,
-		DType:         poly.DTypeFloat32,
-		WeightStore:   poly.NewWeightStore(32 * 32 * 3 * 3 * 3),
+		DType:         cfg.dtype,
+		WeightStore:   ws,
 		UseTiling:     true,
-		TileSize:      0, // Auto-detect
+		TileSize:      0,
 	}
 
-	for i := range l.WeightStore.Master {
-		l.WeightStore.Master[i] = 0.1
-	}
-
-	input := poly.NewTensor[float32](1, l.InputChannels, l.InputDepth, l.InputHeight, l.InputWidth)
+	input := poly.NewTensor[float32](1, 32, 32, 32, 32)
 	for i := range input.Data {
 		input.Data[i] = 0.5
 	}
 
-	// 0. Normal (Non-Tiled)
+	// Normal (non-tiled)
 	l.UseTiling = false
-	fmt.Print("Running Normal (Non-Tiled)...  ")
-	start := time.Now()
 	var post0 *poly.Tensor[float32]
+	start := time.Now()
 	for i := 0; i < iterations; i++ {
 		_, post0 = poly.CNN3ForwardPolymorphic(&l, input)
 	}
 	tNormal := time.Since(start) / time.Duration(iterations)
-	fmt.Printf("%v\n", tNormal)
 
-	// 1. Single-Core Tiled
+	// Single-core tiled
 	l.UseTiling = true
-	l.TileSize = 0 // reset to allow auto-detect
+	l.TileSize = 0
 	l.Network.EnableMultiCoreTiling = false
 	l.SyncToCPU()
-	fmt.Printf("Running Single-Core Tiled (TileSize: %d)...    ", l.TileSize)
-	start = time.Now()
+	tileSize := l.TileSize
 	var post1 *poly.Tensor[float32]
+	start = time.Now()
 	for i := 0; i < iterations; i++ {
 		_, post1 = poly.CNN3ForwardPolymorphic(&l, input)
 	}
 	tSingle := time.Since(start) / time.Duration(iterations)
-	fmt.Printf("%v\n", tSingle)
 
-	// 2. Multi-Core Tiled
+	// Multi-core tiled
 	l.UseTiling = true
-	l.TileSize = 0 // reset to allow auto-detect
+	l.TileSize = 0
 	l.Network.EnableMultiCoreTiling = true
 	l.SyncToCPU()
-	fmt.Printf("Running Multi-Core Tiled (TileSize: %d)... ", l.TileSize)
-	start = time.Now()
 	var post2 *poly.Tensor[float32]
+	start = time.Now()
 	for i := 0; i < iterations; i++ {
 		_, post2 = poly.CNN3ForwardPolymorphic(&l, input)
 	}
 	tMulti := time.Since(start) / time.Duration(iterations)
-	fmt.Printf("%v\n", tMulti)
 
-	// Parity Check
-	maxDiff01 := 0.0
-	maxDiff02 := 0.0
+	// Parity
+	maxDiff01, maxDiff02 := 0.0, 0.0
 	for i := range post0.Data {
 		d01 := float64(post0.Data[i] - post1.Data[i])
-		if d01 < 0 { d01 = -d01 }
-		if d01 > maxDiff01 { maxDiff01 = d01 }
-
+		if d01 < 0 {
+			d01 = -d01
+		}
+		if d01 > maxDiff01 {
+			maxDiff01 = d01
+		}
 		d02 := float64(post0.Data[i] - post2.Data[i])
-		if d02 < 0 { d02 = -d02 }
-		if d02 > maxDiff02 { maxDiff02 = d02 }
+		if d02 < 0 {
+			d02 = -d02
+		}
+		if d02 > maxDiff02 {
+			maxDiff02 = d02
+		}
 	}
 
-	fmt.Println("\n=== Performance Results ===")
-	fmt.Printf("| %-20s | %-12s | %-12s | %-12s |\n", "Implementation", "Time", "Speedup (vs Normal)", "Parity (vs Normal)")
-	fmt.Println("|----------------------|--------------|-------------------|-------------------|")
-	fmt.Printf("| %-20s | %-12v | %-17s | %-17v |\n", "Normal (Native)", tNormal, "1.00x", "BASE")
-	fmt.Printf("| %-20s | %-12v | %-17.2fx | %-17e |\n", "Single-Core Tiled", tSingle, float64(tNormal)/float64(tSingle), maxDiff01)
-	fmt.Printf("| %-20s | %-12v | %-17.2fx | %-17e |\n", "Multi-Core Tiled", tMulti, float64(tNormal)/float64(tMulti), maxDiff02)
+	return result{
+		tNormal:   tNormal,
+		tSingle:   tSingle,
+		tMulti:    tMulti,
+		tileSize:  tileSize,
+		maxDiff01: maxDiff01,
+		maxDiff02: maxDiff02,
+		parity01:  maxDiff01 <= cfg.tolerance,
+		parity02:  maxDiff02 <= cfg.tolerance,
+		sample:    [3]float32{post0.Data[0], post0.Data[1], post0.Data[2]},
+	}
+}
 
-	fmt.Println("\n=== Numerical Sample (First 3 elements) ===")
-	fmt.Printf("| %-20s | %-40s |\n", "Implementation", "Sample Values")
-	fmt.Println("|----------------------|------------------------------------------|")
-	fmt.Printf("| %-20s | %.6f, %.6f, %.6f |\n", "Normal (Native)", post0.Data[0], post0.Data[1], post0.Data[2])
-	fmt.Printf("| %-20s | %.6f, %.6f, %.6f |\n", "Single-Core Tiled", post1.Data[0], post1.Data[1], post1.Data[2])
-	fmt.Printf("| %-20s | %.6f, %.6f, %.6f |\n", "Multi-Core Tiled", post2.Data[0], post2.Data[1], post2.Data[2])
-	
-	if maxDiff01 < 1e-6 && maxDiff02 < 1e-6 {
-		fmt.Println("\n✅ All parity checks passed!")
+func parityMark(ok bool) string {
+	if ok {
+		return "PASS"
+	}
+	return "FAIL"
+}
+
+func main() {
+	fmt.Println("=== CNN3 Multi-Core Tiling — All Numerical Types ===")
+
+	iterations := 3
+
+	types := []typeConfig{
+		// Float families
+		{"Float32",   poly.DTypeFloat32,  1.0,  1e-5},
+		{"Float64",   poly.DTypeFloat64,  1.0,  1e-5},
+		{"Float16",   poly.DTypeFloat16,  1.0,  1e-5},
+		{"BFloat16",  poly.DTypeBFloat16, 1.0,  1e-5},
+		{"FP8-E4M3",  poly.DTypeFP8E4M3, 0.01, 1e-5},
+		{"FP8-E5M2",  poly.DTypeFP8E5M2, 0.01, 1e-5},
+		// Signed integers
+		{"Int64",  poly.DTypeInt64, 0.01, 1e-5},
+		{"Int32",  poly.DTypeInt32, 0.01, 1e-5},
+		{"Int16",  poly.DTypeInt16, 0.01, 1e-5},
+		{"Int8",   poly.DTypeInt8,  0.01, 1e-5},
+		// Unsigned integers
+		{"Uint64", poly.DTypeUint64, 0.01, 1e-5},
+		{"Uint32", poly.DTypeUint32, 0.01, 1e-5},
+		{"Uint16", poly.DTypeUint16, 0.01, 1e-5},
+		{"Uint8",  poly.DTypeUint8,  0.01, 1e-5},
+		// Sub-byte
+		{"Int4",    poly.DTypeInt4,    0.01, 1e-5},
+		{"Ternary", poly.DTypeTernary, 0.1,  1e-5},
+		{"Binary",  poly.DTypeBinary,  0.1,  1e-5},
+	}
+
+	// Header
+	fmt.Println()
+	fmt.Printf("| %-10s | %-5s | %-14s | %-14s | %-14s | %-7s | %-7s | %-7s | %-8s | %-8s |\n",
+		"DType", "Tile", "Normal", "Single-Core", "Multi-Core", "1C-Spd", "MC-Spd", "MaxDiff", "1C-Par", "MC-Par")
+	fmt.Println("|------------|-------|----------------|----------------|----------------|---------|---------|----------|----------|----------|")
+
+	allPass := true
+	for _, cfg := range types {
+		fmt.Printf("  running %-10s ...\r", cfg.name)
+		r := runDType(cfg, iterations)
+		if !r.parity01 || !r.parity02 {
+			allPass = false
+		}
+		fmt.Printf("| %-10s | %-5d | %-14v | %-14v | %-14v | %-7.2fx | %-7.2fx | %-8.2e | %-8s | %-8s |\n",
+			cfg.name,
+			r.tileSize,
+			r.tNormal,
+			r.tSingle,
+			r.tMulti,
+			float64(r.tNormal)/float64(r.tSingle),
+			float64(r.tNormal)/float64(r.tMulti),
+			r.maxDiff02,
+			parityMark(r.parity01),
+			parityMark(r.parity02),
+		)
+	}
+
+	fmt.Println()
+	if allPass {
+		fmt.Println("✅ All parity checks passed across all numerical types!")
 	} else {
-		fmt.Println("\n❌ Parity check failure detected!")
+		fmt.Println("❌ One or more parity checks FAILED — review table above.")
 	}
 }
