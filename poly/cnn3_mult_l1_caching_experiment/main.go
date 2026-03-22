@@ -30,7 +30,7 @@ func main() {
 		DType:         poly.DTypeFloat32,
 		WeightStore:   poly.NewWeightStore(32 * 32 * 3 * 3 * 3),
 		UseTiling:     true,
-		TileSize:      8,
+		TileSize:      0, // Auto-detect
 	}
 
 	for i := range l.WeightStore.Master {
@@ -55,8 +55,10 @@ func main() {
 
 	// 1. Single-Core Tiled
 	l.UseTiling = true
-	l.EnableMultiCoreTiling = false
-	fmt.Print("Running Single-Core Tiled...    ")
+	l.TileSize = 0 // reset to allow auto-detect
+	l.Network.EnableMultiCoreTiling = false
+	l.SyncToCPU()
+	fmt.Printf("Running Single-Core Tiled (TileSize: %d)...    ", l.TileSize)
 	start = time.Now()
 	var post1 *poly.Tensor[float32]
 	for i := 0; i < iterations; i++ {
@@ -66,8 +68,11 @@ func main() {
 	fmt.Printf("%v\n", tSingle)
 
 	// 2. Multi-Core Tiled
-	l.EnableMultiCoreTiling = true
-	fmt.Print("Running Multi-Core Tiled...     ")
+	l.UseTiling = true
+	l.TileSize = 0 // reset to allow auto-detect
+	l.Network.EnableMultiCoreTiling = true
+	l.SyncToCPU()
+	fmt.Printf("Running Multi-Core Tiled (TileSize: %d)... ", l.TileSize)
 	start = time.Now()
 	var post2 *poly.Tensor[float32]
 	for i := 0; i < iterations; i++ {
