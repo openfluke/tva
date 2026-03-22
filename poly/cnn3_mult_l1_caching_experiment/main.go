@@ -140,27 +140,35 @@ func main() {
 	iterations := 3
 
 	types := []typeConfig{
-		// Float families
-		{"Float32",   poly.DTypeFloat32,  1.0,  1e-5},
+		// 64-bit floats (8 bytes/weight → smallest tile)
 		{"Float64",   poly.DTypeFloat64,  1.0,  1e-5},
-		{"Float16",   poly.DTypeFloat16,  1.0,  1e-5},
-		{"BFloat16",  poly.DTypeBFloat16, 1.0,  1e-5},
+		// 32-bit floats (4 bytes/weight)
+		{"Float32",   poly.DTypeFloat32,  1.0,  1e-5},
+		{"Float16",   poly.DTypeFloat16,  1.0,  1e-5}, // stored as float32
+		{"BFloat16",  poly.DTypeBFloat16, 1.0,  1e-5}, // stored as float32
+		// 8-bit floats (1 byte/weight → larger tile possible)
 		{"FP8-E4M3",  poly.DTypeFP8E4M3, 0.01, 1e-5},
 		{"FP8-E5M2",  poly.DTypeFP8E5M2, 0.01, 1e-5},
-		// Signed integers
-		{"Int64",  poly.DTypeInt64, 0.01, 1e-5},
-		{"Int32",  poly.DTypeInt32, 0.01, 1e-5},
-		{"Int16",  poly.DTypeInt16, 0.01, 1e-5},
-		{"Int8",   poly.DTypeInt8,  0.01, 1e-5},
-		// Unsigned integers
-		{"Uint64", poly.DTypeUint64, 0.01, 1e-5},
-		{"Uint32", poly.DTypeUint32, 0.01, 1e-5},
-		{"Uint16", poly.DTypeUint16, 0.01, 1e-5},
-		{"Uint8",  poly.DTypeUint8,  0.01, 1e-5},
-		// Sub-byte
-		{"Int4",    poly.DTypeInt4,    0.01, 1e-5},
-		{"Ternary", poly.DTypeTernary, 0.1,  1e-5},
-		{"Binary",  poly.DTypeBinary,  0.1,  1e-5},
+		// 64-bit integers (8 bytes/weight)
+		{"Int64",     poly.DTypeInt64,  0.01, 1e-5},
+		{"Uint64",    poly.DTypeUint64, 0.01, 1e-5},
+		// 32-bit integers (4 bytes/weight)
+		{"Int32",     poly.DTypeInt32,  0.01, 1e-5},
+		{"Uint32",    poly.DTypeUint32, 0.01, 1e-5},
+		// 16-bit integers (2 bytes/weight)
+		{"Int16",     poly.DTypeInt16,  0.01, 1e-5},
+		{"Uint16",    poly.DTypeUint16, 0.01, 1e-5},
+		// 8-bit integers (1 byte/weight)
+		{"Int8",      poly.DTypeInt8,   0.01, 1e-5},
+		{"Uint8",     poly.DTypeUint8,  0.01, 1e-5},
+		// Sub-byte — all stored as []int8 (1 byte/weight in RAM)
+		{"Int4",      poly.DTypeInt4,   0.01, 1e-5},
+		{"Uint4",     poly.DTypeUint4,  0.01, 1e-5},
+		{"FP4",       poly.DTypeFP4,    0.01, 1e-5},
+		{"Int2",      poly.DTypeInt2,   0.01, 1e-5},
+		{"Uint2",     poly.DTypeUint2,  0.01, 1e-5},
+		{"Ternary",   poly.DTypeTernary, 0.1, 1e-5},
+		{"Binary",    poly.DTypeBinary,  0.1, 1e-5},
 	}
 
 	// Header

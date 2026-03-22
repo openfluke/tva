@@ -1,14 +1,20 @@
-# Experiment: CNN3 Multi-Core Tiled L1 Caching
+# Experiment: CNN3 Multi-Core Tiled L1 Caching — All Numerical Types
 
-This experiment explores the performance impact of combining **Loop-Blocked Tiling** with **Multi-Core Parallelization** for 3D Convolutional layers (CNN3).
+This experiment validates the performance and correctness of combining **Loop-Blocked Tiling**, **Multi-Core Parallelization**, and **Dynamic Hardware Detection** for 3D Convolutional layers (CNN3) across every numerical type used in the industry.
+
+---
 
 ## The Goal
-The primary objective is to break up the volumetric tiling technique across all available CPU cores. By doing so, we aim to utilize the independent **L1/L2 CPU caches** of each core simultaneously, effectively bypassing the memory bandwidth bottleneck that traditionally strikes single-threaded volumetric operations.
+
+Break up the 3D convolution across all available CPU cores, using each core's **private L1 cache** simultaneously to bypass the memory bandwidth bottleneck. Then prove it works correctly for every numerical type — from 64-bit doubles down to 1-bit binary weights.
+
+---
 
 ## How It Works
 
-### Dynamic Hardware Detection
-The engine auto-detects the machine's L1 cache size at runtime via `GetHardwareInfo()`:
+### 1. Dynamic Hardware Detection
+
+`GetHardwareInfo()` queries the real L1 cache size at runtime:
 
 | Platform | Detection Method |
 |----------|-----------------|
@@ -16,72 +22,159 @@ The engine auto-detects the machine's L1 cache size at runtime via `GetHardwareI
 | macOS / iOS | `sysctl -n hw.l1dcachesize` |
 | Linux / Android | `/sys/devices/system/cpu/cpu0/cache/index*/` |
 
-The optimal tile size is then computed as:
+### 2. Dtype-Aware Tile Size
+
+The tile size is computed per-dtype using the **actual storage bytes per weight** — not a fixed 4-byte assumption. Smaller types fit more into L1, allowing larger tiles:
+
 ```
-T < cuberoot(L1 / (4 × inChannels))
+T < cuberoot(L1 / (bytesPerWeight × inChannels))
 ```
-This ensures the 3D local neighborhood (`T³ × C × 4 bytes`) fits inside L1. The result is rounded to the nearest power of 2 within `[8, 32]`.
 
-### Core Saturation
-Goroutines are dispatched **one per filter**, capped by a semaphore at `runtime.NumCPU()`. This ensures all physical cores are saturated regardless of tile size — previously the dispatch was per filter-tile, leaving most cores idle on machines with many cores.
+| DType group | Bytes/weight stored in RAM | Tile formula (32KB L1, 32ch) | Tile on 32KB L1 | Tile on 128KB L1 (M-series) |
+|---|---|---|---|---|
+| Float64, Int64, Uint64 | 8 | cuberoot(128) = 5.0 | 8 (min) | 8 (min) |
+| Float32, Int32, Uint32, Float16, BFloat16 | 4 | cuberoot(256) = 6.4 | 8 (min) | 8 (min) |
+| Int16, Uint16 | 2 | cuberoot(512) = 8.0 | 8 | 8 |
+| Int8, Uint8, FP8, Int4, Uint4, FP4, Int2, Uint2, Ternary, Binary | 1 | cuberoot(1024) = 10.1 | 8 | **16** |
 
-## Multi-Platform Results (v2 — Dynamic Detection + Full Core Saturation)
+On Apple M-series (128KB L1D), sub-byte types automatically get tile=16. On standard x86 (32KB L1), everything sits at 8 — the L1 is the constraint, not the formula.
 
-### 1. Windows (x86_64, TileSize: 8)
+> **Note on Float16/BFloat16:** These are stored as `[]float32` internally (simulated precision via Morph). Their storage footprint is 4 bytes/weight until a native 16-bit storage path is added.
+
+### 3. Core Saturation via Semaphore Dispatch
+
+Goroutines are dispatched **one per filter**, capped by a semaphore at `runtime.NumCPU()`:
+
+```go
+sem := make(chan struct{}, numCPUs)
+for f := 0; f < filters; f++ {
+    sem <- struct{}{}
+    wg.Add(1)
+    go func(b, f int) {
+        defer func() { <-sem; wg.Done() }()
+        // ... spatial tiling for this filter
+    }(b, f)
+}
+```
+
+This saturates every physical core regardless of tile size. Previously the dispatch was per filter-tile (`filters/tileSize = 4` goroutines), leaving most cores idle on many-core machines.
+
+---
+
+## Canonical Arithmetic — Bit-Determinism Across All Paths
+
+All three paths (Normal, Single-Core Tiled, Multi-Core Tiled) use the **same canonical arithmetic** per dtype class, guaranteeing identical outputs:
+
+| Storage type | Accumulator | Scale applied |
+|---|---|---|
+| `[]float32` (Float32, Float16, BFloat16) | `float32` | None |
+| `[]float64` (Float64) | `float64` | None |
+| `[]int64` (Int64, Uint64) | `float64` | At end: `sum *= scale` |
+| `[]int32` (Int32, Uint32) | `float32` | At end: `sum *= scale` |
+| `[]int16` (Int16, Uint16) | `float32` | At end: `sum *= scale` |
+| `[]int8` (Int8, Uint8, FP8, Int4, Uint4, FP4, Int2, Uint2, Ternary, Binary) | `float32` | At end: `sum *= scale` |
+
+Float64 gets its own dedicated tiled functions (`cnn3ForwardTiledF64`, `cnn3ForwardTiledF64Parallel`) that accumulate in `float64` to preserve precision. All other paths apply scale once after the full accumulation loop, not per-element — this is both faster and numerically identical between tiling strategies.
+
+---
+
+## Full Numerical Type Coverage — Windows Results
+
+All 21 industry numerical types validated. Every type passes parity across all three paths (MaxDiff = 0.00e+00).
 
 ```text
-=== Performance Results ===
-| Implementation       | Time         | Speedup (vs Normal) |
-|----------------------|--------------|---------------------|
-| Normal (Native)      | 5.64584262s  | 1.00x               |
-| Single-Core Tiled    | 3.72285212s  | 1.52x               |
-| Multi-Core Tiled     | 576.5626ms   | 9.79x               |
+=== CNN3 Multi-Core Tiling — All Numerical Types ===
+
+| DType      | Tile  | Normal         | Single-Core    | Multi-Core     | 1C-Spd  | MC-Spd  | MaxDiff  | 1C-Par | MC-Par |
+|------------|-------|----------------|----------------|----------------|---------|---------|----------|--------|--------|
+| Float64    | 8     | 6.034232533s   | 3.999765433s   | 671.889666ms   | 1.51x   | 8.98x   | 0.00e+00 | PASS   | PASS   |
+| Float32    | 8     | 5.808043800s   | 3.821229900s   | 594.818366ms   | 1.52x   | 9.76x   | 0.00e+00 | PASS   | PASS   |
+| Float16    | 8     | 6.022105966s   | 3.907457966s   | 617.401666ms   | 1.54x   | 9.75x   | 0.00e+00 | PASS   | PASS   |
+| BFloat16   | 8     | 5.947592833s   | 3.851163266s   | 600.530733ms   | 1.54x   | 9.90x   | 0.00e+00 | PASS   | PASS   |
+| FP8-E4M3   | 8     | 5.879233033s   | 3.960553833s   | 622.865700ms   | 1.48x   | 9.44x   | 0.00e+00 | PASS   | PASS   |
+| FP8-E5M2   | 8     | 5.849661166s   | 3.810731133s   | 639.642666ms   | 1.54x   | 9.15x   | 0.00e+00 | PASS   | PASS   |
+| Int64      | 8     | 6.087717533s   | 3.960493233s   | 672.391866ms   | 1.54x   | 9.05x   | 0.00e+00 | PASS   | PASS   |
+| Uint64     | 8     | 5.963018400s   | 3.840649300s   | 617.497300ms   | 1.55x   | 9.66x   | 0.00e+00 | PASS   | PASS   |
+| Int32      | 8     | 5.836331766s   | 3.998992633s   | 626.164300ms   | 1.46x   | 9.32x   | 0.00e+00 | PASS   | PASS   |
+| Uint32     | 8     | 5.654550800s   | 3.849519633s   | 612.622966ms   | 1.47x   | 9.23x   | 0.00e+00 | PASS   | PASS   |
+| Int16      | 8     | 5.864517666s   | 3.914753166s   | 644.127733ms   | 1.50x   | 9.10x   | 0.00e+00 | PASS   | PASS   |
+| Uint16     | 8     | 5.869446666s   | 3.901839900s   | 621.418200ms   | 1.50x   | 9.45x   | 0.00e+00 | PASS   | PASS   |
+| Int8       | 8     | 5.812613066s   | 3.872499600s   | 617.053700ms   | 1.50x   | 9.42x   | 0.00e+00 | PASS   | PASS   |
+| Uint8      | 8     | 5.900448500s   | 3.908468166s   | 634.776666ms   | 1.51x   | 9.30x   | 0.00e+00 | PASS   | PASS   |
+| Int4       | 8     | 5.864039800s   | 3.870071933s   | 648.315800ms   | 1.52x   | 9.05x   | 0.00e+00 | PASS   | PASS   |
+| Uint4      | 8     | 6.002881100s   | 3.924815766s   | 648.543666ms   | 1.53x   | 9.26x   | 0.00e+00 | PASS   | PASS   |
+| FP4        | 8     | 5.959968366s   | 3.954932533s   | 617.204666ms   | 1.51x   | 9.66x   | 0.00e+00 | PASS   | PASS   |
+| Int2       | 8     | 6.045082666s   | 3.892814166s   | 624.882266ms   | 1.55x   | 9.67x   | 0.00e+00 | PASS   | PASS   |
+| Uint2      | 8     | 5.904033766s   | 3.890896166s   | 623.552866ms   | 1.52x   | 9.47x   | 0.00e+00 | PASS   | PASS   |
+| Ternary    | 8     | 5.988010133s   | 3.903254300s   | 621.902900ms   | 1.53x   | 9.63x   | 0.00e+00 | PASS   | PASS   |
+| Binary     | 8     | 5.967329766s   | 3.923752533s   | 620.740966ms   | 1.52x   | 9.61x   | 0.00e+00 | PASS   | PASS   |
+
+✅ All parity checks passed across all numerical types!
 ```
-> **9.79x speedup** — full core saturation fix unlocked nearly 2x more throughput vs the previous 5.29x result.
 
-### 2. Linux (Nitro 51 / Beast — x86_64, TileSize: 8)
+---
 
-```text
-=== Performance Results ===
-| Implementation       | Time         | Speedup (vs Normal) |
-|----------------------|--------------|---------------------|
-| Normal (Native)      | 2.844159108s | 1.00x               |
-| Single-Core Tiled    | 1.646254143s | 1.73x               |
-| Multi-Core Tiled     | 325.697117ms | 8.73x               |
+## Multi-Platform Summary (Float32 reference)
+
+| Platform | Normal | Single-Core | Multi-Core | MC Speedup |
+|---|---|---|---|---|
+| Windows (x86_64, ~12 cores) | 5.81s | 3.82s | 595ms | **9.76x** |
+| Linux / Beast (x86_64) | 2.84s | 1.65s | 326ms | **8.73x** |
+| Apple Silicon M-series (ARM64) | 1.31s | 1.33s | 279ms | **4.68x** |
+
+---
+
+## Why All Types Run at the Same Speed on CPU
+
+Every path — regardless of dtype — ultimately executes:
+```go
+sum += float32(input) * float32(weight)
 ```
-> **8.73x speedup** — up from 5.91x. The extra cores were simply idle before.
 
-### 3. Apple Silicon (Mac Mini — ARM64, TileSize: 8)
+The weight may be stored as `int8`, `int16`, or `int64`, but it's cast to `float32` for the multiply. The CPU always executes **32-bit floating point MACs**. The dtype affects:
+- Cache footprint (smaller = more fits per cache line)
+- The tile size formula (now correctly tuned per dtype)
+- Correctness of the output values (each type's quantization is preserved)
 
-```text
-=== Performance Results ===
-| Implementation       | Time         | Speedup (vs Normal) |
-|----------------------|--------------|---------------------|
-| Normal (Native)      | 1.307438183s | 1.00x               |
-| Single-Core Tiled    | 1.334914283s | 0.98x               |
-| Multi-Core Tiled     | 279.181808ms | 4.68x               |
-```
-> **4.68x speedup** — up from 3.02x. Single-core tiling still shows slight overhead because Apple's hardware prefetcher already handles sequential access patterns extremely well.
+But it does NOT yet change the actual instruction type executed. True per-type acceleration requires:
 
-## Deep Breakdown
+| Technique | Potential speedup for INT8 | What's needed |
+|---|---|---|
+| AVX-512 VNNI (x86) | 4–16x over FP32 | CGo + C intrinsics or Go assembly |
+| ARM NEON dot product | 4–8x | CGo or plan9 ASM |
+| GPU tensor cores (INT8) | 16–64x | WebGPU / CUDA (next phase) |
 
-### Why does single-core tiling underperform on Apple Silicon?
-Apple M-series CPUs have a **128KB+ L1D cache per performance core**, far larger than typical x86 (32–48KB). With 32 input channels, a tile of 8 costs `8³ × 32 × 4 = 65KB` — this already fits in L1 without tiling. The tile loop overhead (offset math, bounds checks) exceeds the cache benefit, so the native path wins single-threaded.
+The CPU implementation is the **correctness and scaling reference**. It is the verified ground truth that all GPU results will be validated against.
 
-### Why is multi-core still a big win on Mac?
-The M-series has 4 performance cores. Splitting 32 filters across 4 cores gives a theoretical 4x — the 4.68x result confirms efficient core utilization with some cache locality bonus.
-
-### Why does x86 benefit more from tiling?
-On standard x86, the L1D is 32–48KB. A `32×32×32` input with 32 channels at float32 = **4MB total** — completely impossible to cache without blocking. Tiling directly attacks the memory wall, and then parallelism multiplies the effect.
+---
 
 ## Bugs Fixed During This Experiment
 
-1. **`TileSize=0` guard bypass** — `CNN3ForwardPolymorphic` only entered the tiled path if `TileSize > 0`. When `SyncToCPU()` wasn't called, single-core tiled silently ran the non-tiled path.
-2. **`SyncToCPU()` on wrong receiver** — The experiment was calling `l.Network.SyncToCPU()` which iterates `n.Layers`. Since `l` was a standalone layer (not in the network), `l.EnableMultiCoreTiling` was never set and multi-core ran as single-core.
-3. **Dead core saturation** — The parallel dispatcher spawned `filters / tileSize = 4` goroutines regardless of core count. A 12-core machine had 8 cores idle during the heavy convolution work. Fixed by dispatching per-filter with a `numCPUs`-wide semaphore.
+1. **`TileSize=0` guard bypass** — `CNN3ForwardPolymorphic` only entered the tiled path if `TileSize > 0`. When `SyncToCPU()` wasn't called, single-core tiled silently ran the non-tiled path — appearing as identical performance to Normal.
 
-## Conclusion
+2. **`SyncToCPU()` on wrong receiver** — The experiment called `l.Network.SyncToCPU()`, which iterates `n.Layers`. Since `l` was a standalone layer not added to the network, `l.EnableMultiCoreTiling` was never set and multi-core silently ran as single-core.
 
-The **Multi-Core Tiled Dispatcher** with dynamic hardware detection is a robust, cross-platform optimization. With proper core saturation, the engine now scales linearly with available CPU cores on all tested platforms.
+3. **Dead core saturation** — The parallel dispatcher spawned `filters / tileSize = 4` goroutines regardless of core count. A 12-core machine had 8 cores idle. Fixed by dispatching one goroutine per filter behind a `numCPUs`-wide semaphore.
 
-✅ **Full Numerical Parity Verified across all platforms.**
+4. **Integer fast paths truncated float input** — Normal path for all integer types did `int32(float32_input)`, truncating 0.5 → 0. Tiled path did `float32(input) * float32(weight)`. Fixed by rewriting all integer normal paths to use float32 accumulation with scale applied at end.
+
+5. **Generic fallthrough re-quantized stored weights** — The fallback path called `SimulatePrecision()` on weights already morphed by `Morph()`, causing int8 overflow for FP8/sub-byte types. Fixed by removing the per-element `SimulatePrecision` call and applying scale once to the full sum.
+
+6. **Float64 precision lost in tiled paths** — The generic tiled function used `var sum float32` even for `[]float64` weights. Float64 now has dedicated tiled functions (`cnn3ForwardTiledF64`, `cnn3ForwardTiledF64Parallel`) that accumulate in `float64`.
+
+7. **`default` branch in tiled switch hardcoded `scale=1.0`** — Sub-byte and non-standard types going through the `default` CastWeights path lost their scale factor. Fixed to pass `layer.WeightStore.Scale`.
+
+8. **Tile size formula assumed 4 bytes per weight** — All dtypes got the same tile regardless of precision. Fixed by making `CalculateOptimalCNN3TileSize` dtype-aware, computing tile from actual storage bytes per weight.
+
+---
+
+## What This Establishes
+
+This is the **complete CPU reference implementation** for 3D CNN forward passes across the full industry numerical type spectrum:
+
+- Every type used in production ML (Float32, Float16, BFloat16, INT8, INT4, Binary, and more) is implemented, correct, and parallelised
+- All three execution modes are bit-deterministic against each other for every type
+- Hardware is auto-detected and tile sizes are tuned at runtime per dtype and per machine
+- The implementation is pure Go — zero CGo, zero platform-specific assembly, single binary for Windows / Linux / macOS / Android / iOS
+
+The next frontier is the **GPU path** — where INT8 and sub-byte types will show their true hardware acceleration via tensor cores, validated against this CPU reference.
