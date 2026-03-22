@@ -5,47 +5,41 @@ This experiment explores the performance impact of combining **Loop-Blocked Tili
 ## The Goal
 The primary objective is to break up the volumetric tiling technique across all available CPU cores. By doing so, we aim to utilize the independent **L1/L2 CPU caches** of each core simultaneously, effectively bypassing the memory bandwidth bottleneck that traditionally strikes single-threaded volumetric operations.
 
-## Methodology
-- **Implementation**: We added an `EnableMultiCoreTiling` flag to `VolumetricLayer` and implemented `cnn3ForwardTiledGenericParallel` in `poly/cnn3.go`.
-- **Parallelization Strategy**: The workload is partitioned across `batch` and `filter tiles` using Go's `runtime.NumCPU()` and `sync.WaitGroup`.
-- **Benchmarking**: A 32x32x32 volume with 32 channels and 32 filters was used for the comparison.
+## Multi-Platform Results
 
-## Results
-The Following output was captured on the test machine:
+### 1. Apple Silicon (Mac Mini M4, 16GB)
+On the M4, the native implementation is exceptionally fast, likely due to massive L2 caches and aggressive hardware prefetching.
 
 ```text
-=== CNN3 Multi-Core Tiling Experiment ===
-Running Normal (Non-Tiled)...  5.75234406s
-Running Single-Core Tiled...    3.6560858s
-Running Multi-Core Tiled...     1.08672434s
-
 === Performance Results ===
 | Implementation       | Time         | Speedup (vs Normal) | Parity (vs Normal) |
 |----------------------|--------------|-------------------|-------------------|
-| Normal (Native)      | 5.75234406s  | 1.00x             | BASE              |
-| Single-Core Tiled    | 3.6560858s   | 1.57x             | 0.000000e+00      |
-| Multi-Core Tiled     | 1.08672434s  | 5.29x             | 0.000000e+00      |
-
-=== Numerical Sample (First 3 elements) ===
-| Implementation       | Sample Values                            |
-|----------------------|------------------------------------------|
-| Normal (Native)      | 12.800031, 19.199993, 19.199993 |
-| Single-Core Tiled    | 12.800031, 19.199993, 19.199993 |
-| Multi-Core Tiled     | 12.800031, 19.199993, 19.199993 |
-
-✅ All parity checks passed!
+| Normal (Native)      | 1.300888583s | 1.00x             | BASE              |
+| Single-Core Tiled    | 1.347335508s | 0.97x             | 0.000000e+00      |
+| Multi-Core Tiled     | 430.649283ms | 3.02x             | 0.000000e+00      |
 ```
+> **Observation**: Single-core tiling actually incurred a slight overhead on M4. This suggests the M4's hardware cache management is already highly optimized for the "Native" loop pattern.
+
+### 2. Linux (Nitro 51 / Beast - x86_64)
+The classic "Memory Wall" is much more evident here, and the tiling optimizations deliver massive gains.
+
+```text
+=== Performance Results ===
+| Implementation       | Time         | Speedup (vs Normal) | Parity (vs Normal) |
+|----------------------|--------------|-------------------|-------------------|
+| Normal (Native)      | 2.811934892s | 1.00x             | BASE              |
+| Single-Core Tiled    | 1.609353206s | 1.75x             | 0.000000e+00      |
+| Multi-Core Tiled     | 475.451844ms | 5.91x             | 0.000000e+00      |
+```
+> **Observation**: A near **6x Speedup** confirms that for standard x86 architectures, multi-core tiling is a transformative optimization.
 
 ## Deep Breakdown
 
-### 1. Normal (Native) - 5.75s
-This is the baseline implementation using standard nested loops. It suffered from frequent cache misses as the 3D volume is too large to fit in the CPU's local cache, forcing constant trips to slower main RAM (DDR4/DDR5).
+### Why the difference?
+- **Apple M4 Architecture**: Apple's Unified Memory and oversized caches mean that "cache misses" are less penalizing than on x86. The overhead of managing tiles (calculating offsets, bounds checking) can sometimes eclipse the benefit when the hardware is already hiding the latency.
+- **x86/Linux Optimization**: On traditional CPUs, the jump from 2.8s to 0.47s proves that the "Memory Wall" is the primary bottleneck. By parallelizing the tiles, we effectively created a **~5.9x wider pipe** to the L1 caches.
 
-### 2. Single-Core Tiled - 3.66s (1.57x Speedup)
-By introducing loop-blocking (tiling), we constrained the working set of the convolution to fit within the L1/L2 cache of a single core. This significantly reduced the "Memory Wall" effect, but remained bound by the frequency and throughput of a single core.
+## Conclusion
+The **Multi-Core Tiled Dispatcher** is a success. While Apple Silicon provides a high baseline, the optimizations provide critical performance boosts on both platforms and establish a scalable "Bedrock" for the next version of the engine.
 
-### 3. Multi-Core Tiled - 1.09s (5.29x Speedup)
-This is the "Symphony" approach. By breaking the tiled workload across all cores, we not only multiplied the raw processing power but also the **Aggregate L1 Cache Capacity**. Each core processes its own independent tile in its own local cache, resulting in a near-linear speedup and a massive reduction in total execution time.
-
-## Key Takeaway
-The **5.29x Speedup** with **0.00e+00 Numerical Divergence** proves that multi-core tiling is a viable and highly effective strategy for bridging the gap between CPU and GPU performance in the `poly` engine. This technique is now scheduled for engine-wide integration in **v0.75.0**.
+✅ **Full Numerical Parity Verified across all platforms.**
