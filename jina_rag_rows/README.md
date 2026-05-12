@@ -213,6 +213,57 @@ That means each fake booking email searched the CRM note index. The tool did not
 load every account into the answer. It retrieved only the highest-scoring note
 rows, then used the best matching account as the extracted booking account.
 
+## Reliability Notes
+
+`58/60` rank-1 and `60/60` top-k is strong for this demo. It means the router
+almost always puts the right account first, and always includes the right account
+somewhere in the candidate notes.
+
+That does not mean real Salesforce data will automatically score the same. The
+demo data is clean: account names are present, contacts match, notes are fresh,
+and the booking emails use similar wording to the cached notes. Real CRM data can
+include duplicates, stale notes, forwarded emails, missing account names, aliases,
+merged accounts, conflicting notes, and permission boundaries.
+
+The next improvements for real-world reliability would be:
+
+- harder eval emails that omit exact account names
+- recency weighting so newer notes beat stale notes
+- account/contact boosting for known sender domains
+- duplicate and merged-account handling
+- confidence thresholds and human review for low-confidence matches
+- reranking the top results before extraction
+- full Jina encoder support when Loom has the BERT-style encoder path
+
+### Jina Encoder Note
+
+This demo currently uses Jina's learned token embedding table inside Loom:
+
+```text
+WordPiece tokens -> Jina token vectors -> Loom LayerEmbedding -> mean pool
+```
+
+The full Jina embedding model also includes a BERT-style encoder:
+
+```text
+WordPiece tokens
+-> Jina token vectors
+-> 12 bidirectional encoder layers
+-> contextual token vectors
+-> mean pool
+-> final semantic embedding
+```
+
+That full encoder would usually improve harder cases where the exact words do not
+match, for example when an email says "usual onboarding slot for Maya's team" but
+the CRM note says "Northstar Robotics prefers renewal planning at the San Francisco
+briefing center." The encoder helps the vector represent context and meaning, not
+just the average of word-level embeddings.
+
+The current `58/60` rank-1 and `60/60` top-k CRM result is still useful because it
+shows the retrieval/cache/workflow shape works. Full Jina encoder support is the
+next quality upgrade, not a change to the architecture.
+
 ## Generated Files
 
 Outputs land in `artifacts/` by default:
